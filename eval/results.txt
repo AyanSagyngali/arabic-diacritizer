@@ -1,0 +1,8 @@
+failure mode            base preserved  marks recovered     DER
+clean                            100%          100.0%   0.000
+extra_preamble                   100%           95.7%   0.059
+alef_normalized                  100%           97.1%   0.032
+letter_substituted               100%           98.6%   0.013
+word_dropped                     100%           81.9%   0.180
+punct_changed                    100%          100.0%   0.000
+mark_order_swapped               100%          100.0%   0.000
