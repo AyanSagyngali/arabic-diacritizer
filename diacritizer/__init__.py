@@ -1,0 +1,1 @@
+"""Arabic diacritization service."""
