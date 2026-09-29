@@ -1,0 +1,141 @@
+# ISTORIK VIDEO FACTORY — конфигурация.
+# Все настройки конвейера находятся здесь; в коде значений по умолчанию нет.
+# Секреты (API-ключи) — только в .env.
+
+app:
+  host: 127.0.0.1
+  port: 8765
+  open_browser: true          # открыть панель в браузере при запуске
+  language: ru
+
+paths:
+  projects: ./projects
+  data: ./data                # кэш тем, токены ChatCut, служебные файлы
+  browser_profile: ./browser_profile   # профиль Playwright (сохраняет вход в Google / ChatCut)
+  channel_profile: ./channel/profile.yaml
+
+video:
+  width: 1920
+  height: 1080
+  fps: 30
+
+llm:
+  provider: gemini
+  # Модели перебираются по порядку; если модели нет у ключа — берётся следующая.
+  # "auto:pro" / "auto:flash" = автоматически найти самую свежую модель через ListModels.
+  text_models: ["auto:pro", "gemini-2.5-pro", "auto:flash", "gemini-2.5-flash"]
+  fast_models: ["auto:flash", "gemini-2.5-flash"]
+  temperature: 0.7
+  max_retries: 5
+  use_google_search: true     # grounding через Google Search для тем и исследования
+
+topics:
+  count: 8                    # сколько тем показывать
+  cache_hours: 12
+  recent_days: 45             # окно «свежих» видео конкурентов
+  search_queries:             # запросы для поиска актуальных роликов в нише
+    - история Казахстана
+    - история кочевников
+    - история Центральной Азии
+    - Монгольская империя история
+    - Золотая Орда
+    - история тюрков
+    - история Великой степи
+
+script:
+  target_minutes: 15          # длина ролика по умолчанию (можно поменять в панели для каждого проекта)
+  words_per_minute: 150       # темп дикторской речи для расчёта объёма
+  min_chapters: 4
+  max_chapters: 9
+
+frames:
+  words_per_frame: 15         # правило канала: ~1 кадр на 15 слов (≈6 с на кадр)
+  hook_words_per_frame: 8     # в хуке кадры меняются чаще
+  hook_seconds: 45            # ориентировочная длина хука (уточняется по сценарию)
+  max_words_per_frame: 32     # длинные предложения делятся на несколько кадров
+  aspect_ratio: "16:9"
+
+images:
+  backend: flow               # flow | gemini_api
+  fallback_backend: gemini_api  # если Flow недоступен/сломался; пусто = без запасного варианта
+  retries_per_frame: 2        # немедленные повторы
+  final_retry_rounds: 2       # повторные круги по неудачным кадрам в конце
+  min_width: 1000
+  gemini_image_models: ["auto:image", "imagen-4.0-generate-001", "gemini-2.5-flash-image"]
+  flow:
+    url: https://labs.google/fx/tools/flow
+    headless: false
+    per_frame_timeout_sec: 240
+    browser_executable: ""      # путь к Chrome, если нужен конкретный браузер (пусто = установленный Chrome/Edge/Chromium)
+    project_name_prefix: "ИСТОРИК — "
+
+voice:
+  speaker: Sadaltager
+  style: friendly
+  tts_models: ["auto:tts-pro", "gemini-2.5-pro-preview-tts", "auto:tts", "gemini-2.5-flash-preview-tts"]
+  chunk_max_chars: 900        # размер части озвучки (по целым предложениям)
+  chunk_min_chars: 250
+  direction: >-
+    Читай как диктор серьёзного исторического документального фильма: спокойно, уверенно,
+    выразительно и уважительно, с доброжелательной (friendly) интонацией, без шуток и театральности.
+    Держи ровный темп, делай естественные паузы на точках. Произноси даты и имена чётко.
+  sample_rate: 24000
+  pause_between_chunks_ms: 350
+  pause_between_chapters_ms: 800
+  edge_silence_ms: 120        # сколько тишины оставить по краям каждой части
+  target_lufs: -16
+  retries: 4
+
+editing:
+  default_transition: builtin:tr-cross-dissolve
+  default_transition_frames: 15
+  chapter_transition: builtin:tr-dip-to-black
+  chapter_transition_frames: 24
+  impact_transition: builtin:tr-flash
+  impact_transition_frames: 10
+  hook_transitions: [builtin:tr-whip-pan, builtin:tr-flash, builtin:tr-anticipation-zoom, builtin:tr-rack-focus]
+  accent_transitions: [builtin:tr-organic-dissolve, builtin:tr-soft-wipe, builtin:tr-luma-blend, builtin:tr-rack-focus]
+  accent_every_n_cuts: 9      # умеренно: редкий акцентный переход в основной части
+  zoom_push: library:zoom:slow-push
+  zoom_pull: library:zoom:slow-pull
+  hook_punches_max: 6
+  hook_punch_seconds: 2.5
+  chapter_card_seconds: 3.0
+  title_reveal_seconds: 3.8
+  name_title_seconds: 3.5
+  name_titles_max: 10
+  date_stamp_seconds: 3.3
+  date_stamps_max: 12
+  sfx_db: -9
+  sfx_allowed: [vine-boom-impact, dramatic-thunder-roll, taiko-hit, deep-short-whoosh, airy-short-whoosh, simple-whoosh]
+  sfx_forbidden: [sitcom-laugh-track, anime-wow-reaction, awkward-crow-flyby, record-scratch-stop]
+  sfx_min_gap_seconds: 6
+  gold: "#D4AF37"
+  plate_color: "#C62828"
+  subtitles:
+    font: Montserrat
+    weight: 800
+    size_px: 58
+    color: "#FFFFFF"
+    stroke_width: 5
+    shadow_strength: 60
+    highlight_color: "#FFD84A"
+    pacing: auto
+
+chatcut:
+  enabled: true
+  mcp_url: https://api.chatcut.io/api/external-mcp/mcp
+  editor_base: https://app.chatcut.io
+  oauth_callback_port: 8766
+  upload_helper_url: https://api.chatcut.io/api/external-mcp/media-import/upload-media.mjs
+  add_batch: 40               # элементов за один вызов edit_item
+  refine_timing_with_transcript: true
+  wait_transcription_minutes: 30
+  export_video: true
+  export_resolution: 1080p
+
+export:
+  local_render: true          # локальный рендер ffmpeg (гарантированный результат + предпросмотр)
+  local_width: 1280
+  local_height: 720
+  burn_subtitles: true

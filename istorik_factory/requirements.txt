@@ -1,0 +1,12 @@
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+pyyaml>=6.0
+python-dotenv>=1.0
+pillow>=10.0
+numpy>=1.26
+scipy>=1.11
+pyloudnorm>=0.1.1
+playwright>=1.45
+imageio-ffmpeg>=0.5
+mcp>=1.12,<2
