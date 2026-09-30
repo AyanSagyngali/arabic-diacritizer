@@ -631,12 +631,12 @@ def test_images_chain_ends_with_title_cards(isolated, monkeypatch):
 
 # ======================= железо и «Рекомендовать» =======================
 @pytest.mark.parametrize("hw,text0,img0,model", [
-    ({"gpu": None, "vram_gb": 0, "cuda": False, "ram_gb": 8, "gpus": []}, "gemini", "gemini_api", "qwen3:4b"),
-    ({"gpu": "RTX 2050", "vram_gb": 4, "cuda": True, "ram_gb": 15.7, "gpus": [{"vendor": "nvidia"}]}, "gemini", "gemini_api",
+    ({"gpu": None, "vram_gb": 0, "cuda": False, "ram_gb": 8, "gpus": []}, "omniroute", "gemini_api", "qwen3:4b"),
+    ({"gpu": "RTX 2050", "vram_gb": 4, "cuda": True, "ram_gb": 15.7, "gpus": [{"vendor": "nvidia"}]}, "omniroute", "gemini_api",
      "qwen3:4b"),
-    ({"gpu": "RTX 3060", "vram_gb": 12, "cuda": True, "ram_gb": 32, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:14b"),
-    ({"gpu": "RTX 4090", "vram_gb": 24, "cuda": True, "ram_gb": 64, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:32b"),
-    ({"gpu": "RTX 3070", "vram_gb": 8, "cuda": True, "ram_gb": 16, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:8b"),
+    ({"gpu": "RTX 3060", "vram_gb": 12, "cuda": True, "ram_gb": 32, "gpus": [{"vendor": "nvidia"}]}, "omniroute", "comfyui", "qwen3:14b"),
+    ({"gpu": "RTX 4090", "vram_gb": 24, "cuda": True, "ram_gb": 64, "gpus": [{"vendor": "nvidia"}]}, "omniroute", "comfyui", "qwen3:32b"),
+    ({"gpu": "RTX 3070", "vram_gb": 8, "cuda": True, "ram_gb": 16, "gpus": [{"vendor": "nvidia"}]}, "omniroute", "comfyui", "qwen3:8b"),
 ])
 def test_recommend_by_hardware(isolated, hw, text0, img0, model):
     from factory.providers.recommend import recommend

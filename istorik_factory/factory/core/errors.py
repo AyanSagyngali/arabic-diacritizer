@@ -135,8 +135,10 @@ def humanize(exc: BaseException) -> dict:
         when = f" Ближайший сброс лимита — примерно в {fmt_time(exc.reset_at)}." if exc.reset_at else ""
         return {"title": f"Все источники {'текста' if exc.part == 'text' else 'озвучки' if exc.part == 'voice' else 'кадров'} "
                          f"сейчас недоступны.{when}",
-                "fix": "Откройте «Источники» и добавьте запасной путь без лимита (Ollama, Piper/Silero, ComfyUI/Pollinations) "
-                       "или нажмите «Рекомендовать» — затем «Продолжить проект».", "detail": text}
+                "fix": ("Подключите OmniRoute (бесплатные ИИ без ключей): «Источники» → OmniRoute → «Установить и запустить» "
+                        "или пункт 7 в терминале — затем «Продолжить проект»." if exc.part == "text" else
+                        "Откройте «Источники» и добавьте запасной путь без лимита (Piper/Silero, ComfyUI/Pollinations) "
+                        "или нажмите «Рекомендовать» — затем «Продолжить проект»."), "detail": text}
     if isinstance(exc, AuthenticationError):
         return {"title": f"Ключ или вход не принят: {text[:200]}", "fix": "Проверьте ключ в окне «Ключи» — работа идёт через другие "
                 "источники.", "detail": text}

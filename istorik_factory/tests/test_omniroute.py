@@ -330,17 +330,21 @@ def test_no_node_gives_clear_install_error(isolated, monkeypatch):
 
 
 # ======================= место в цепочке, рекомендации, поиск =======================
-def test_default_chain_gemini_omniroute_ollama(isolated):
+def test_default_chain_omniroute_first(isolated):
     from factory.providers.catalog import DEFAULT_CHAINS
     ch = DEFAULT_CHAINS["text"]
-    assert ch[:3] == ["gemini", "omniroute", "ollama"]
+    assert ch[:3] == ["omniroute", "gemini", "ollama"]
 
 
-def test_old_settings_get_omniroute_after_gemini(isolated):
+def test_old_settings_get_omniroute_first_once(isolated):
     from factory import settings
-    (isolated.path("data") / "settings.json").write_text(json.dumps({"chains": {"text": ["gemini", "ollama"]}}), encoding="utf-8")
-    assert settings.load(isolated)["chains"]["text"] == ["gemini", "omniroute", "ollama"]
-    settings.save(isolated, {"chains": {"text": ["ollama"]}})  # пользователь убрал — больше не возвращаем
+    for old in (["gemini", "ollama"], ["gemini", "omniroute", "ollama"]):  # без OmniRoute и с ним в середине
+        (isolated.path("data") / "settings.json").write_text(json.dumps({"chains": {"text": old}, "user_set": {"text": True}}),
+                                                             encoding="utf-8")
+        assert settings.load(isolated)["chains"]["text"] == ["omniroute", "gemini", "ollama"]
+    settings.save(isolated, {"chains": {"text": ["ollama", "omniroute"]}})  # пользователь переставил — больше не трогаем
+    assert settings.load(isolated)["chains"]["text"] == ["ollama", "omniroute"]
+    settings.save(isolated, {"chains": {"text": ["ollama"]}})  # убрал — больше не возвращаем
     assert settings.load(isolated)["chains"]["text"] == ["ollama"]
 
 
@@ -370,7 +374,7 @@ def test_gemini_429_goes_straight_to_omniroute(isolated, monkeypatch):
         fake.close()
 
 
-def test_recommend_puts_omniroute_after_gemini(isolated):
+def test_recommend_puts_omniroute_first(isolated):
     from factory.providers.recommend import recommend
     hw = {"gpu": "RTX 2050", "vram_gb": 4, "cuda": True, "ram_gb": 15.7, "gpus": [{"vendor": "nvidia"}]}
     import os as _os
@@ -380,8 +384,40 @@ def test_recommend_puts_omniroute_after_gemini(isolated):
     finally:
         _os.environ.pop("GEMINI_API_KEY", None)
     ch = r["chains"]["text"]
-    assert ch.index("gemini") < ch.index("omniroute") < ch.index("ollama")
+    assert ch[0] == "omniroute" and ch.index("gemini") < ch.index("ollama")
     assert "OmniRoute запущен" in r["why"]["text"]
+    strong = recommend({"gpu": "RTX 4090", "vram_gb": 24, "cuda": True, "ram_gb": 64, "gpus": [{"vendor": "nvidia"}]})
+    assert strong["chains"]["text"][0] == "omniroute"
+
+
+def test_autostart_installs_when_missing(isolated, monkeypatch):
+    from factory.providers import install, omniroute
+    monkeypatch.setattr(omniroute, "mock_mode", lambda: False)
+    monkeypatch.setattr(omniroute, "probe", lambda t=2.0: {"running": False, "installed": False})
+    monkeypatch.setattr(omniroute, "exe", lambda: None)
+    started = []
+    monkeypatch.setattr(install, "install_async", lambda name: started.append(name) or True)
+    said = []
+    omniroute._auto["done"] = False
+    assert omniroute.autostart(said.append) == "installing" and started == ["omniroute"]
+    assert "устанавливаю сам" in said[0]
+    isolated["providers"]["opts"]["omniroute_auto"] = "0"
+    omniroute._auto["done"] = False
+    assert omniroute.autostart() == "off"
+
+
+def test_autostart_starts_installed(isolated, monkeypatch):
+    from factory.providers import omniroute
+    monkeypatch.setattr(omniroute, "mock_mode", lambda: False)
+    monkeypatch.setattr(omniroute, "probe", lambda t=2.0: {"running": False, "installed": True})
+    monkeypatch.setattr(omniroute, "exe", lambda: "/x/omniroute")
+    monkeypatch.setattr(omniroute, "start", lambda wait=90.0: (True, "запущен"))
+    omniroute._auto["done"] = False
+    assert omniroute.autostart() == "started"
+    assert omniroute.autostart() == "off"  # второй раз (терминал + панель) — не запускаем повторно
+    monkeypatch.setattr(omniroute, "probe", lambda t=2.0: {"running": False, "port_busy": True, "error": "порт занят"})
+    omniroute._auto["done"] = False
+    assert omniroute.autostart().startswith("failed")
 
 
 def test_facts_use_omniroute_search(isolated, monkeypatch):

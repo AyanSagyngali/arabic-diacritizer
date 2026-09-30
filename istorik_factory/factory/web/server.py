@@ -44,6 +44,14 @@ def _startup() -> None:
     monitor().start()
     atexit.register(_on_exit)
 
+    def omni():
+        try:
+            from ..providers import omniroute
+            omniroute.autostart(lambda t: events.toast(t, "info"))
+        except Exception as e:  # noqa: BLE001
+            events.toast(f"OmniRoute: {e}", "warning")
+    threading.Thread(target=omni, daemon=True, name="omniroute-auto").start()
+
     def bg():
         try:
             health.run_checks(deep_keys=False)

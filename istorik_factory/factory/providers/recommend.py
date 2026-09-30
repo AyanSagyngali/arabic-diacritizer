@@ -46,16 +46,16 @@ def recommend(hw: dict, flow_ok: bool = False, part: str | None = None, screen_o
     omni_up = bool(om_state.get("running"))
     omni_note = ("OmniRoute запущен — бесплатные ИИ без ключей, сам переключается между провайдерами"
                  if omni_up else "OmniRoute (если установить кнопкой) — бесплатные ИИ без ключей")
+    # всё через OmniRoute: он первым, сам чередует бесплатные провайдеры; дальше — прямые пути как запасные
     if strong_gpu and om:
-        text = ["ollama"] + (["gemini"] if gkeys else []) + ["omniroute"] + api
-        why["text"] = (f"Видеокарта {hw.get('gpu')} ({cuda_vram:g} ГБ) тянет {om} — текст локально без квот; "
-                       f"Gemini и {omni_note} — запасные.")
+        text = ["omniroute", "ollama"] + (["gemini"] if gkeys else []) + api
+        why["text"] = (f"Основной — {omni_note}. Видеокарта {hw.get('gpu')} ({cuda_vram:g} ГБ) тянет {om} — локальный "
+                       "запасной без квот; затем Gemini API и ключи.")
     else:
-        text = (["gemini"] if gkeys else []) + ["omniroute"] + api + (["ollama"] if om else [])
-        why["text"] = ("Основной — Gemini API (лучший русский и поиск Google), пока есть квота; при 429 сразу "
-                       f"{omni_note}; дальше бесплатные API"
-                       + (f" и локальная Ollama ({om}) — на слабой видеокарте медленно, поэтому не единственный путь" if om else "")
-                       + (", последним — Gemini в Chrome на экране." if screen_ok else "."))
+        text = ["omniroute"] + (["gemini"] if gkeys else []) + api + (["ollama"] if om else [])
+        why["text"] = (f"Основной — {omni_note}. Если он не ответил — Gemini API (пока есть квота), бесплатные API"
+                       + (f" и локальная Ollama ({om}) — на слабой видеокарте медленно, поэтому последней" if om else "")
+                       + (", в самом конце — Gemini в Chrome на экране." if screen_ok else "."))
     if _have_secret("GEMINI_PAID_API_KEY"):
         text.append("gemini_paid")
     if _have_secret("CUSTOM_LLM_URL"):

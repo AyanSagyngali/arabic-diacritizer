@@ -488,11 +488,10 @@ class Terminal:
                      "Добавьте свои аккаунты в панели OmniRoute → Providers (ChatGPT, Claude, Grok, Gemini, Groq…).")
         from . import settings
         s = settings.load(config())
-        if "omniroute" not in s["chains"]["text"]:
-            ch = s["chains"]["text"]
-            pos = ch.index("gemini") + 1 if "gemini" in ch else 0
-            settings.save(config(), {"chains": {"text": ch[:pos] + ["omniroute"] + ch[pos:]}})
-            self.out("OmniRoute добавлен в цепочку текста после Gemini.")
+        ch = s["chains"]["text"]
+        if ch[:1] != ["omniroute"]:
+            settings.save(config(), {"chains": {"text": ["omniroute"] + [x for x in ch if x != "omniroute"]}})
+            self.out("OmniRoute поставлен первым в цепочку текста — весь текст идёт через него.")
 
     def cmd_keys(self) -> None:
         from .config import gemini_keys, parse_keys, save_gemini_keys
@@ -592,6 +591,14 @@ def main(debug: bool = False, panel: bool = True) -> None:
     monitor().start()
     t = Terminal()
     t.debug = debug
+
+    def omni():
+        try:
+            from .providers import omniroute
+            omniroute.autostart(t.out)
+        except Exception as e:  # noqa: BLE001
+            t.out(f"OmniRoute: {e}")
+    threading.Thread(target=omni, daemon=True, name="omniroute-auto").start()
     if panel:
         url = start_panel_in_background()
         if url:

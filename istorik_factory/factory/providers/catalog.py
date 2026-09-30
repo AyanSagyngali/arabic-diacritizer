@@ -123,7 +123,7 @@ CATALOG: dict[str, dict[str, Info]] = {
 }
 
 # источники без ключа/установки пропускаются молча; экранные — только после согласия; «Нет» — только осознанно
-DEFAULT_CHAINS = {"text": ["gemini", "omniroute", "ollama", "groq", "openrouter", "gemini_web"],
+DEFAULT_CHAINS = {"text": ["omniroute", "gemini", "ollama", "groq", "openrouter", "gemini_web"],
                   "voice": ["gemini", "aistudio", "piper"],
                   "images": ["gemini_api", "pollinations"]}
 FLOW_CHAIN = ["flow", "gemini_api", "pollinations"]

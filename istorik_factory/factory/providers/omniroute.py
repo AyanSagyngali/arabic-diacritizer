@@ -140,7 +140,7 @@ def start(wait: float = 90.0) -> tuple[bool, str]:
     log = open(logs / "omniroute.log", "ab")  # noqa: SIM115 — файл живёт вместе с процессом
     try:
         proc = subprocess.Popen([e, "serve", "--no-open", "--no-tray", "--port", str(port())], stdout=log, stderr=log,
-                                stdin=subprocess.DEVNULL, creationflags=NOWIN, cwd=str(Path.home()))
+                                stdin=subprocess.DEVNULL, creationflags=NOWIN, cwd=str(Path.home()), env=_node_env())
     except OSError as ex:
         return False, f"не удалось запустить OmniRoute: {ex}"
     _started["proc"] = proc
@@ -168,6 +168,58 @@ def stop_if_started() -> None:
             proc.terminate()
     except Exception:  # noqa: BLE001
         pass
+
+
+# ---------- автозапуск ----------
+def _node_env() -> dict:
+    """Окружение для omniroute: папка Node.js в PATH (после установки через winget PATH процесса ещё старый)."""
+    from .install import node_exe
+    env = dict(os.environ)
+    node = node_exe()
+    if node:
+        env["PATH"] = str(Path(node).parent) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+_auto = {"done": False}
+_auto_lock = __import__("threading").Lock()
+
+
+def autostart(say=None) -> str:
+    """При запуске программы: OmniRoute в цепочке текста → запустить; не установлен → поставить (Node.js + npm) в фоне.
+    → что сделано: running | started | installing | off | failed: …"""
+    say = say or (lambda _t: None)
+    if mock_mode() or str(config().at("providers.opts.omniroute_auto") or "1") != "1":
+        return "off"
+    with _auto_lock:  # терминал и панель стартуют вместе — запускаем один раз
+        if _auto["done"]:
+            return "off"
+        _auto["done"] = True
+    chain = ((config().get("providers") or {}).get("chains") or {}).get("text") or []
+    if "omniroute" not in chain:
+        return "off"
+    st = probe(2.0)
+    if st["running"]:
+        return "running"
+    if st.get("port_busy"):
+        say(f"OmniRoute: {st.get('error')}")
+        return "failed: port"
+    if exe():
+        ok, msg = start(90.0)
+        if ok:
+            say("OmniRoute запущен")
+            return "started"
+        say(f"OmniRoute: {msg}")
+        return f"failed: {msg}"
+    from . import install
+    say("OmniRoute не установлен — устанавливаю сам (Node.js и OmniRoute, 3–10 минут, работа идёт дальше)…")
+    install.install_async("omniroute")
+    return "installing"
+
+
+def installing() -> bool:
+    from . import install
+    return bool((install._state.get("omniroute") or {}).get("running"))
 
 
 # ---------- источник текста ----------

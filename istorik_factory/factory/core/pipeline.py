@@ -170,6 +170,36 @@ class Runner:
         raise RuntimeError("слишком много запросов действия пользователя подряд")
 
     # ---------- сторож ----------
+    def _wait_for_sources(self, ctx: Context, e: Exception, waits: list) -> bool:
+        """Все источники заняты, но скоро освободятся (сброс лимита ≤ 15 мин) или OmniRoute сейчас ставится —
+        ждём и повторяем сами, а не падаем с ошибкой. Не больше 8 ожиданий на этап."""
+        from .errors import NoProviderLeft, fmt_time
+        if not isinstance(e, NoProviderLeft) or waits[0] >= 8:
+            return False
+        try:
+            from ..providers import omniroute
+            busy_install = e.part == "text" and omniroute.installing()
+        except Exception:  # noqa: BLE001
+            busy_install = False
+        limit = float(config().at("pipeline.wait_reset_max_seconds", 900) or 900)
+        if busy_install:
+            wait, why = 30.0, "OmniRoute устанавливается — жду и продолжу сам"
+        elif e.reset_at and 0 < e.reset_at - time.time() <= limit:
+            wait, why = e.reset_at - time.time() + 5, f"все источники в лимите — жду сброса до {fmt_time(e.reset_at)} и продолжу сам"
+        else:
+            return False
+        waits[0] += 1
+        p = ctx.project
+        p.update(current_operation=why[:1].upper() + why[1:] + "…")
+        p.log.log(why)
+        events.toast(why[:1].upper() + why[1:], "info")
+        end = time.time() + wait
+        while time.time() < end:
+            ctx.check_stop()
+            p.touch()
+            ctx.sleep(min(5.0, max(0.1, end - time.time())))
+        return True
+
     def _watchdog(self, ctx: Context, stop: threading.Event) -> None:
         cfg = config()
         while not stop.wait(2.0):
@@ -211,7 +241,10 @@ class Runner:
                 if p.stage(key)["status"] == "done":
                     continue
                 attempts = 1 + int(config().at("app.stage_auto_retries", 2))
-                for attempt in range(1, attempts + 1):
+                waits = [0]
+                attempt = 0
+                while attempt < attempts:
+                    attempt += 1
                     ctx.check_stop()
                     p.update(current_stage=key)
                     p.set_stage(key, "running", "")
@@ -227,6 +260,9 @@ class Runner:
                         p.add_error(f"{labels[key]}: {type(e).__name__}: {e}", human=h)
                         p.set_stage(key, "failed", h["title"])
                         retryable = type(e).__name__ not in ("AllKeysExhausted", "NoValidKeys", "RegionBlocked")
+                        if self._wait_for_sources(ctx, e, waits):
+                            attempt -= 1  # ожидание сброса лимита / установки OmniRoute — не попытка
+                            continue
                         if attempt < attempts and retryable:
                             events.toast(f"{labels[key]}: {h['title']} — повторяю…", "warning")
                             ctx.sleep(3 if isinstance(e, StageStalled) else 8)

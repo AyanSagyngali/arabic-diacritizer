@@ -20,6 +20,7 @@ from pathlib import Path
 from .providers.catalog import CATALOG, DEFAULT_CHAINS, FLOW_CHAIN, NEW_PROVIDERS
 
 PARTS = ("text", "voice", "images")
+MIGRATIONS = ("migr:omniroute_first",)  # разовые переносы старых настроек (записываются в settings.json → known)
 OPTS = {
     "ollama_model": "", "ollama_url": "http://127.0.0.1:11434",
     "edge_voice": "ru-RU-DmitryNeural", "silero_speaker": "aidar", "piper_voice": "ru_RU-denis-medium",
@@ -35,6 +36,7 @@ OPTS = {
     "ui_mode_set": "",
     "omniroute_url": "", "omniroute_model": "auto", "omniroute_stop_on_exit": "",
     "omniroute_search": "1",          # факты для исследования — ещё и из поиска OmniRoute
+    "omniroute_auto": "1",            # при запуске программы сам ставит и запускает OmniRoute
     "openai_model": "", "xai_model": "", "deepseek_model": "", "custom_model": "",
 }
 _lock = threading.Lock()
@@ -87,6 +89,10 @@ def load(cfg) -> dict:
                 chains[part] = c
     user_set = {p: bool(v) for p, v in (raw.get("user_set") or {}).items() if p in PARTS}
     known = set(raw.get("known") or [])
+    if raw.get("chains") and "migr:omniroute_first" not in known:  # один раз: всё через OmniRoute — он первым в тексте
+        t = chains["text"]
+        chains["text"] = ["omniroute"] + [x for x in t if x != "omniroute"]
+        known.add("omniroute")
     if raw.get("chains"):  # новые источники (например OmniRoute) один раз встраиваются в старые цепочки по умолчанию
         for part, new in NEW_PROVIDERS.items():
             for pid in new:
@@ -126,7 +132,7 @@ def apply(cfg, s: dict | None = None) -> dict:
 
 
 def _write(cfg, s: dict) -> None:
-    s = dict(s, known=sorted({pid for part in CATALOG.values() for pid in part}))
+    s = dict(s, known=sorted({pid for part in CATALOG.values() for pid in part} | set(MIGRATIONS)))
     p = _path(cfg)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
