@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+projects/*
+!projects/.gitkeep
+data/*
+!data/.gitkeep
+browser_profile/
+logs/
+assets/
+.pytest_cache/
+tests/screenshots/
+START_ISTORIK.bat

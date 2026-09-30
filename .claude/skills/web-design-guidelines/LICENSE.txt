@@ -1,0 +1,1 @@
+MIT License — Copyright (c) 2025 Vercel Labs. Source: https://github.com/vercel-labs/agent-skills and https://github.com/vercel-labs/web-interface-guidelines

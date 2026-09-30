@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="color-scheme" content="dark">
+<title>ИСТОРИК VIDEO FACTORY</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e8b64c'/%3E%3Ctext x='32' y='46' font-size='40' text-anchor='middle' font-family='Georgia' fill='%231a1305'%3EИ%3C/text%3E%3C/svg%3E">
+<link rel="preload" href="/static/fonts/inter-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/playfair-display-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/fonts.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<a class="skip" href="#main">Перейти к содержимому</a>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="vignette" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="top">
+  <a class="brand" href="#/" aria-label="ИСТОРИК VIDEO FACTORY — на главную">
+    <span class="brand-mark" aria-hidden="true">И</span>
+    <span class="brand-name">ИСТОРИК VIDEO FACTORY<small id="channelLine">автономное производство видео</small></span>
+  </a>
+  <div class="top-spacer"></div>
+  <div class="top-actions">
+    <button class="btn btn-sm btn-ghost" id="sourcesBtn" type="button">Источники</button>
+    <button class="badge pill-btn" id="keysPill" type="button" aria-label="Ключи Gemini">Ключи…</button>
+    <button class="btn btn-sm" id="healthBtn" type="button" aria-label="Проверить систему">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      <span class="btn-label">Проверить систему</span>
+    </button>
+  </div>
+</header>
+
+<main id="main" class="wrap" tabindex="-1">
+  <div id="view"></div>
+</main>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+<canvas id="confetti" aria-hidden="true"></canvas>
+
+<dialog id="dlgKeys" aria-labelledby="dlgKeysTitle">
+  <form method="dialog" class="dlg-body" id="keysForm">
+    <h2 id="dlgKeysTitle">Ключи</h2>
+    <h3 class="dlg-sub">Google AI Studio (Gemini)</h3>
+    <p class="muted">Вставьте один или сразу несколько ключей — через запятую, пробел или с новой строки. Программа сама отбросит лишний текст
+      и будет использовать ключи по кругу: если у ключа кончилась квота, сразу берётся следующий. Ключи хранятся только у вас, в файле <code translate="no">.env</code>.</p>
+    <div id="keysSummary" class="row"></div>
+    <ul class="keys-list" id="keysList" aria-label="Список ключей"></ul>
+    <p class="hint" style="margin:0">В поле «проект» подпишите, из какого проекта Google ключ (например «Аккаунт 1 / A»). Ключи одного проекта делят один лимит —
+      когда у проекта кончилась дневная квота, программа сразу переходит к ключам другого проекта.</p>
+    <div class="field">
+      <label for="keysText">Новые ключи</label>
+      <textarea id="keysText" name="keys" autocomplete="off" spellcheck="false" placeholder="AIza… или AQ.…, по одному в строке…"></textarea>
+    </div>
+    <label class="row" style="gap:8px"><input type="checkbox" id="keysReplace" name="replace"> Заменить все текущие ключи</label>
+    <h3 class="dlg-sub">Другие сервисы (необязательно)</h3>
+    <p class="hint" style="margin:0">Запасные источники на случай, когда кончились лимиты Gemini. Ключи хранятся только в файле <code translate="no">.env</code> на этом компьютере.</p>
+    <div class="extra-keys" id="extraKeys"></div>
+    </form>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Закрыть</button>
+    <button class="btn" type="button" id="keysRemoveBad">Удалить неверные</button>
+    <button class="btn" type="button" id="keysCheck">Проверить ключи</button>
+    <button class="btn btn-primary" type="button" id="keysSave">Сохранить</button>
+  </div>
+</dialog>
+
+<dialog id="dlgStart" aria-labelledby="dlgStartTitle">
+  <div class="dlg-body">
+    <h2 id="dlgStartTitle">Начать производство</h2>
+    <div class="field">
+      <label for="startTitle">Название ролика</label>
+      <input id="startTitle" name="title" autocomplete="off" spellcheck="true">
+      <div class="suggest" id="startSuggest"></div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      <div class="field"><label for="startMinutes">Длительность</label>
+        <select id="startMinutes" name="minutes">
+          <option value="1">1 мин — тест</option><option value="3">3 мин</option><option value="5">5 мин</option><option value="8">8 мин</option>
+          <option value="10">10 мин</option><option value="15">15 мин</option><option value="20">20 мин</option><option value="30">30 мин</option>
+        </select></div>
+    </div>
+    <div class="start-chain"><span class="hint" id="startChain"></span> <button class="btn btn-ghost btn-sm" type="button" id="startSources">Изменить источники</button></div>
+    <p class="hint" id="startEstimate"></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Отмена</button>
+    <button class="btn btn-primary" type="button" id="startGo">Начать производство</button>
+  </div>
+</dialog>
+
+<dialog id="dlgAction" aria-labelledby="dlgActionTitle">
+  <div class="dlg-body">
+    <h2 id="dlgActionTitle">Требуется действие</h2>
+    <p id="dlgActionMsg"></p>
+    <p id="dlgActionUrl" class="hint"></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-danger" type="button" id="actionStop">Остановить</button>
+    <button class="btn btn-primary" type="button" id="actionContinue" autofocus>Продолжить</button>
+  </div>
+</dialog>
+
+<dialog id="dlgConfirm" aria-labelledby="dlgConfirmTitle">
+  <div class="dlg-body"><h2 id="dlgConfirmTitle">Подтверждение</h2><p id="dlgConfirmMsg"></p></div>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Отмена</button>
+    <button class="btn btn-danger" type="button" id="confirmGo">Подтвердить</button>
+  </div>
+</dialog>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>
