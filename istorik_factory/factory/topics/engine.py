@@ -17,7 +17,8 @@ from ..core.storage import read_json, write_json
 from ..llm.gemini import S, llm, strs
 from .youtube import YouTube
 
-_state = {"running": False, "error": None, "fix": None, "stage": "", "started": None, "mode": None}
+_state = {"running": False, "error": None, "fix": None, "stage": "", "started": None, "mode": None, "alternatives": [],
+          "provider": None, "gen": 0}
 _lock = threading.Lock()
 
 TOPIC_SCHEMA = S("array", items=S("object", props={
@@ -82,32 +83,79 @@ def _set(**kw) -> None:
     events.publish("topics_status", dict(_state))
 
 
-def refresh_async(more: bool = False) -> bool:
+def max_seconds() -> float:
+    return float(config().at("topics.max_seconds", 90))
+
+
+def _alternatives(exclude: str | None) -> list[dict]:
+    """Другие источники текста для кнопки «Искать через другой источник»."""
+    from ..providers.catalog import CATALOG
+    chain = (config().at("providers.chains") or {}).get("text") or []
+    return [{"id": pid, "label": CATALOG["text"][pid].label} for pid in chain if pid != exclude and pid in CATALOG["text"]]
+
+
+def refresh_async(more: bool = False, provider: str | None = None) -> bool:
     with _lock:
         if _state["running"]:
             return False
-        _set(running=True, error=None, fix=None, stage="Готовлюсь к поиску…", started=time.time(), mode="more" if more else "new")
-    threading.Thread(target=_refresh_safe, args=(more,), daemon=True, name="topics").start()
+        _set(running=True, error=None, fix=None, stage="Готовлюсь к поиску…", started=time.time(), mode="more" if more else "new",
+             alternatives=[], provider=provider, gen=_state["gen"] + 1)
+        gen = _state["gen"]
+    threading.Thread(target=_refresh_safe, args=(more, provider, gen), daemon=True, name="topics").start()
     return True
 
 
-def _refresh_safe(more: bool) -> None:
-    try:
-        refresh(more=more)
-        _set(running=False, stage="")
-    except Exception as e:  # ошибка показывается в панели понятным текстом
-        h = humanize(e)
-        _set(running=False, stage="", error=h["title"], fix=h["fix"])
+def _refresh_safe(more: bool, provider: str | None = None, gen: int = 0) -> None:
+    """Поиск тем ограничен по времени (topics.max_seconds, 90 с): результат или понятная ошибка с выбором другого источника."""
+    import logging
+    log = logging.getLogger("istorik")
+    box: dict = {}
+
+    def work():
+        try:
+            box["result"] = refresh(more=more, provider=provider, gen=gen)
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    log.info("Поиск тем: старт%s", f" ({provider})" if provider else "")
+    t = threading.Thread(target=work, daemon=True, name="topics-work")
+    t.start()
+    t.join(max_seconds() + 5)
+    if gen != _state["gen"]:
+        return
+    used = _used_provider()
+    if t.is_alive():
+        _state["gen"] += 1  # поздний ответ уже не перезапишет список
+        err = f"Поиск тем не уложился в {max_seconds():.0f} с"
+        fix = "Источник текста отвечает слишком медленно. Нажмите «Искать через другой источник» или попробуйте позже."
+        log.warning("Поиск тем: превышено время")
+        _set(running=False, stage="", error=err, fix=fix, alternatives=_alternatives(provider or used))
+        events.toast(f"Поиск тем: {err}", "error", fix=fix)
+    elif "error" in box:
+        log.error("Поиск тем: ошибка: %s", box["error"])
+        h = humanize(box["error"])
+        _set(running=False, stage="", error=h["title"], fix=h["fix"], alternatives=_alternatives(provider or used))
         events.toast(f"Поиск тем: {h['title']}", "error", fix=h["fix"])
+    else:
+        log.info("Поиск тем: готово")
+        _set(running=False, stage="", provider=used)
 
 
-def refresh(more: bool = False) -> list[dict]:
+def _used_provider() -> str | None:
+    try:
+        return llm().active()
+    except Exception:
+        return None
+
+
+def refresh(more: bool = False, provider: str | None = None, gen: int | None = None) -> list[dict]:
+    t0 = time.time()
     cfg = config()
     prof = channel_profile()
     chan = prof["channel"]
     yt = YouTube()
     own, comp = [], []
-    deadline = time.time() + float(cfg.at("topics.youtube_seconds", 20))  # YouTube не должен задерживать поиск
+    deadline = time.time() + min(float(cfg.at("topics.youtube_seconds", 20)), max_seconds() / 4)  # YouTube не задерживает поиск
 
     ref = chan.get("youtube_channel_id") or chan.get("youtube_handle")
     if ref and not mock_mode():
@@ -165,7 +213,9 @@ def refresh(more: bool = False) -> list[dict]:
         channel=chan["name"], niche=chan.get("niche", ""), audience=chan.get("audience", ""),
         formats="; ".join(chan.get("formats", [])), today=dt.date.today().isoformat(),
         published="\n".join(f"- {t}" for t in dict.fromkeys(published)), own=fmt(own[:15]), competitors=fmt(comp[:30]),
-        count=int(cfg.at("topics.count", 6))), search=True, schema=TOPIC_SCHEMA, temperature=0.9, cache=False)
+        count=int(cfg.at("topics.count", 6))), search=True, schema=TOPIC_SCHEMA, temperature=0.9, cache=False,
+        deadline=max(10.0, max_seconds() - (time.time() - t0)), only=provider,
+        search_query=f"{dt.date.today().year} годовщина история {chan.get('niche', '')}".strip())
     web = g.sources()
     if isinstance(topics, dict):
         topics = topics.get("topics") or topics.get("items") or []
@@ -181,9 +231,11 @@ def refresh(more: bool = False) -> list[dict]:
         t["created"] = dt.datetime.now().isoformat(timespec="seconds")
         clean.append(t)
     if not clean:
-        raise RuntimeError("Gemini не вернул ни одной темы — попробуйте «Обновить темы» ещё раз")
+        raise RuntimeError("Источник текста не вернул ни одной темы — попробуйте «Обновить темы» ещё раз или другой источник")
     clean.sort(key=lambda t: -int(t.get("score") or 0))
     result = (old.get("topics", []) + clean) if more else clean
+    if gen is not None and gen != _state["gen"]:
+        return result  # поиск уже признан зависшим — не перезаписываем
     write_json(cfg.path("data") / "topics.json", {"updated_at": dt.datetime.now().isoformat(timespec="seconds"),
                                                   "own_videos": own[:20], "competitor_videos": comp[:40], "topics": result})
     events.publish("topics", {"count": len(result)})

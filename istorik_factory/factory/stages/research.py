@@ -80,7 +80,8 @@ def run(ctx) -> None:
     def one(item):
         key, label, tmpl = item
         prompt = tmpl.format(title=title, period=period) + extra + f"\nОбъём: до {limit} слов."
-        text, sources = g.generate_ex(prompt, system=SYSTEM, search=True, temperature=0.3, tier="flash", thinking="low")
+        text, sources = g.generate_ex(prompt, system=SYSTEM, search=True, temperature=0.3, tier="flash", thinking="low",
+                                      search_query=f"{title} {period}".strip())
         return {"label": label, "text": text, "sources": sources}
 
     def saved(item, res):

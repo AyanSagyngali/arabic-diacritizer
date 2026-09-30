@@ -10,12 +10,12 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import health
+from .. import health, providers, settings
 from ..config import channel_profile, config, gemini_keys, missing_secrets, mock_mode, parse_keys, save_gemini_keys
 from ..core import events
 from ..core.errors import humanize
@@ -72,13 +72,164 @@ class OpenIn(BaseModel):
 
 
 def _keys_summary() -> dict:
-    if mock_mode():
-        from ..llm.gemini import llm
-        return llm().pool.summary()
-    if not gemini_keys():
+    if not mock_mode() and not gemini_keys():
         return {"total": 0, "ok": 0, "unknown": 0, "quota": 0, "invalid": 0, "text": "ключи не заданы", "keys": []}
-    from ..llm.gemini import llm
-    return llm().pool.summary()
+    from ..llm.gemini import gemini
+    from ..llm.usage import project_labels
+    s = gemini().pool.summary()
+    labels = project_labels()
+    for k in s.get("keys", []):
+        k["project"] = labels.get(k.get("fp"), "")
+    return s
+
+
+def _usage() -> dict:
+    from ..providers.limits import full_summary
+    try:
+        return full_summary()
+    except Exception as e:  # noqa: BLE001 — лимиты не должны ломать панель
+        return {"gemini": {}, "providers": [], "error": str(e)[:200]}
+
+
+EXTRA_SECRETS = ("GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "HF_TOKEN", "POLLINATIONS_TOKEN",
+                 "GEMINI_PAID_API_KEY", "YOUTUBE_API_KEY")
+
+
+class ProvidersIn(BaseModel):
+    chains: dict[str, list[str]] | None = None
+    opts: dict[str, str] | None = None
+    text: str | None = None
+    voice: str | None = None
+    images: str | None = None
+
+
+class RecommendIn(BaseModel):
+    part: str | None = None
+    apply: bool = False
+
+
+class ExtraKeysIn(BaseModel):
+    values: dict[str, str]
+
+
+class ProjectsIn(BaseModel):
+    labels: dict[str, str]
+
+
+@app.get("/api/usage")
+def get_usage():
+    return _usage()
+
+
+@app.get("/api/usage/limits")
+def get_limits():
+    return _usage()
+
+
+@app.get("/api/providers")
+def get_providers():
+    return providers.snapshot()
+
+
+def _providers_changed() -> dict:
+    providers.reset_all()
+    snap = providers.snapshot()
+    events.publish("providers", snap)
+    return snap
+
+
+@app.post("/api/providers")
+def set_providers(body: ProvidersIn):
+    if runner.busy:
+        raise HTTPException(409, "Сначала остановите производство — источники меняются между проектами")
+    try:
+        settings.save(config(), body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _providers_changed()
+
+
+@app.post("/api/providers/recommend")
+def recommend_providers(body: RecommendIn):
+    from ..providers.hw import detect
+    from ..providers.recommend import recommend
+    if body.part and body.part not in ("text", "voice", "images"):
+        raise HTTPException(400, "неизвестная часть")
+    h = detect()
+    h["has_voice_sample"] = (config().path("data") / "voice_sample.wav").exists()
+    prof = config().path("browser_profile")
+    flow_ok = bool(config().at("flow.subscription", False)) or (prof.exists() and any(prof.iterdir()))
+    rec = recommend(h, flow_ok=flow_ok, part=body.part)
+    if body.apply:
+        if runner.busy:
+            raise HTTPException(409, "Сначала остановите производство — источники меняются между проектами")
+        settings.save(config(), {"chains": rec["chains"], "opts": rec["opts"]})
+        rec["snapshot"] = _providers_changed()
+    return rec
+
+
+@app.get("/api/hw")
+def get_hw():
+    from ..providers.hw import describe, detect
+    h = detect()
+    return {"hw": h, "text": describe(h)}
+
+
+@app.post("/api/providers/install/{name}")
+def install_provider(name: str):
+    from ..providers import install
+    if name not in install.INSTALLERS:
+        raise HTTPException(400, "неизвестный источник")
+    return {"started": install.install_async(name)}
+
+
+@app.post("/api/providers/voice_sample")
+async def voice_sample(file: UploadFile):
+    """Образец голоса для Chatterbox (10–30 с чистой речи). Хранится только в data/."""
+    data = await file.read()
+    if len(data) > 30 * 1024 * 1024:
+        raise HTTPException(400, "Файл больше 30 МБ — нужен короткий отрывок 10–30 секунд")
+    import io
+    import numpy as np
+    import soundfile as sf
+    try:
+        a, rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+    except Exception:
+        raise HTTPException(400, "Не удалось прочитать звук. Подойдёт WAV, FLAC или OGG (MP3 сначала сохраните как WAV)")
+    a = a.mean(axis=1)
+    dur = len(a) / rate
+    if dur < 5:
+        raise HTTPException(400, f"Слишком коротко ({dur:.1f} с) — нужно 10–30 секунд речи")
+    a = a[: int(rate * 40)]
+    peak = float(np.abs(a).max() or 1)
+    dest = config().path("data") / "voice_sample.wav"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dest), (a / peak * 0.9).astype(np.float32), rate, subtype="PCM_16")
+    return {"ok": True, "seconds": round(min(dur, 40), 1), "snapshot": _providers_changed()}
+
+
+@app.post("/api/keys/extra")
+def save_extra_keys(body: ExtraKeysIn):
+    from ..config import save_secret
+    saved = []
+    for k, v in body.values.items():
+        if k not in EXTRA_SECRETS:
+            raise HTTPException(400, f"неизвестный ключ {k}")
+        v = (v or "").strip()
+        if v and (len(v) < 8 or not v.isascii() or any(ch.isspace() for ch in v)):
+            raise HTTPException(400, f"{k}: ключ выглядит неправильно — вставьте его целиком, без пробелов")
+        save_secret(k, v)
+        os.environ[k] = v
+        saved.append(k)
+    snap = _providers_changed()
+    return {"saved": saved, "secrets": snap["secrets"]}
+
+
+@app.post("/api/keys/projects")
+def save_key_projects(body: ProjectsIn):
+    from ..llm.usage import set_project_labels
+    set_project_labels({k: v.strip()[:40] for k, v in body.labels.items()})
+    return {"keys": _keys_summary(), "usage": _usage()}
 
 
 @app.get("/")
@@ -93,6 +244,7 @@ def state():
         "busy": runner.busy, "current": cur, "mock": mock_mode(), "stages": STAGES,
         "missing_secrets": missing_secrets(), "keys": _keys_summary(), "health": health.state(),
         "topics_status": topics.status(), "channel": channel_profile().get("channel", {}).get("name"),
+        "usage": _usage(), "providers": providers.snapshot(),
         "defaults": {"target_minutes": config().at("script.target_minutes"), "image_backend": config().at("images.backend"),
                      "wpm": config().at("script.words_per_minute")},
     }
@@ -130,11 +282,17 @@ def get_topics():
     return {"topics": c.get("topics", []), "updated_at": c.get("updated_at"), "status": topics.status(), "fresh": topics.is_fresh()}
 
 
+NO_TEXT = "Нет источника текста: добавьте ключ Gemini или Groq (кнопка «Ключи») или установите Ollama в «Источниках»"
+
+
 @app.post("/api/topics/refresh")
-def refresh_topics(more: bool = False):
-    if missing_secrets():
-        raise HTTPException(400, "Сначала добавьте API-ключ Google AI Studio (кнопка «Ключи»)")
-    return {"started": topics.refresh_async(more=more), "status": topics.status()}
+def refresh_topics(more: bool = False, provider: str | None = None):
+    from ..providers.catalog import CATALOG
+    if provider and provider not in CATALOG["text"]:
+        raise HTTPException(400, "неизвестный источник")
+    if missing_secrets() and not provider:
+        raise HTTPException(400, NO_TEXT)
+    return {"started": topics.refresh_async(more=more, provider=provider), "status": topics.status()}
 
 
 @app.post("/api/topics/normalize")
@@ -217,7 +375,7 @@ def project_file(pid: str, path: str):
 @app.post("/api/start")
 def start(body: StartIn):
     if missing_secrets():
-        raise HTTPException(400, "Сначала добавьте API-ключ Google AI Studio (кнопка «Ключи»)")
+        raise HTTPException(400, NO_TEXT)
     if runner.busy:
         raise HTTPException(409, "Уже идёт производство другого видео — дождитесь окончания или остановите его")
     if body.custom_title and body.custom_title.strip():
@@ -228,8 +386,7 @@ def start(body: StartIn):
             raise HTTPException(404, "Тема не найдена — обновите список тем")
     minutes = body.target_minutes or topic.get("suggested_minutes") or config().at("script.target_minutes")
     p = Project.create(topic, target_minutes=float(minutes))
-    if body.image_backend in ("flow", "gemini_api"):
-        p.update(image_backend=body.image_backend)
+    p.update(image_backend=(config().at("providers.chains") or {}).get("images", [config().at("images.backend")])[0])
     runner.start(p)
     return {"id": p.data["id"]}
 
@@ -239,7 +396,7 @@ def resume(pid: str, from_stage: str | None = None):
     if runner.busy:
         raise HTTPException(409, "Уже идёт производство — дождитесь окончания или остановите его")
     if missing_secrets():
-        raise HTTPException(400, "Сначала добавьте API-ключ Google AI Studio (кнопка «Ключи»)")
+        raise HTTPException(400, NO_TEXT)
     p = Project.load(pid)
     if from_stage and from_stage not in STAGE_KEYS:
         raise HTTPException(400, "неизвестный этап")
@@ -297,9 +454,9 @@ def save_keys(body: KeysIn):
         save_secret("YOUTUBE_API_KEY", body.YOUTUBE_API_KEY.strip())
     if mock_mode():
         return _keys_summary()
-    from ..llm.gemini import llm
-    llm().reload_keys()
-    s = llm().check_keys()
+    from ..llm.gemini import gemini
+    gemini().reload_keys()
+    s = gemini().check_keys()
     if not topics.cached().get("topics") and s["ok"]:
         topics.refresh_async()
     health.run_async()
@@ -310,18 +467,18 @@ def save_keys(body: KeysIn):
 def check_keys():
     if mock_mode() or not gemini_keys():
         return _keys_summary()
-    from ..llm.gemini import llm
-    return llm().check_keys()
+    from ..llm.gemini import gemini
+    return gemini().check_keys()
 
 
 @app.post("/api/keys/remove_invalid")
 def remove_invalid():
     if mock_mode():
         return _keys_summary()
-    from ..llm.gemini import llm
-    bad = {k.value for k in llm().pool.keys() if k.status == "invalid"}
+    from ..llm.gemini import gemini
+    bad = {k.value for k in gemini().pool.keys() if k.status == "invalid"}
     save_gemini_keys([k for k in gemini_keys() if k not in bad])
-    llm().reload_keys()
+    gemini().reload_keys()
     return _keys_summary()
 
 

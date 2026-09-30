@@ -125,7 +125,7 @@ function renderHome() {
       <div class="stack">
         <section class="card hero enter" aria-labelledby="heroH">
           <h1 id="heroH">Выберите тему — дальше программа сделает видео сама</h1>
-          <p class="lead">Исследование, сценарий, кадры, озвучка голосом Sadaltager, монтаж в ChatCut и проверка. Прогресс сохраняется после каждого шага — после сбоя работа продолжится с того же места.</p>
+          <p class="lead">Исследование, сценарий, кадры, озвучка, монтаж в ChatCut и проверка. Кончился лимит у одного источника — работу продолжит следующий. Прогресс сохраняется после каждого шага — после сбоя работа продолжится с того же места.</p>
           <form class="compose" id="composeForm" autocomplete="off">
             <div class="field"><label for="customTitle">Своя тема</label>
               <input id="customTitle" name="custom_title" placeholder="Например: Вся история Казахского ханства…" spellcheck="true"></div>
@@ -147,30 +147,213 @@ function renderHome() {
           <div class="section-h"><h2 id="healthH" class="grow">Готовность системы</h2><span id="healthBadge"></span></div>
           <ul class="health-list" id="healthList"></ul>
         </section>
-        <section class="card card-pad enter" style="--i:2" aria-labelledby="projH">
+        <section class="card card-pad enter" style="--i:2" aria-labelledby="usageH" id="limitsCard">
+          <div class="section-h"><h2 id="usageH" class="grow">Лимиты на сегодня</h2><span class="hint num" id="usageReset"></span></div>
+          <div id="usageBox" aria-live="polite"></div>
+        </section>
+        <section class="card card-pad enter" style="--i:4" aria-labelledby="projH">
           <div class="section-h"><h2 id="projH" class="grow">Проекты</h2></div>
           <div class="projects" id="projectsList"></div>
         </section>
       </aside>
-    </div>`;
+    </div>
+    <section class="card card-pad enter sources" style="--i:5" aria-labelledby="provH" id="sourcesCard">
+      <div class="section-h"><h2 id="provH" class="grow">Источники</h2>
+        <button class="btn btn-sm btn-primary" type="button" id="recAll">Рекомендовать всё</button></div>
+      <p class="hint" style="margin:-4px 0 12px"><span id="provHw"></span><br>Работает первый готовый источник; если у него кончился лимит или он сломался — дальше по списку, автоматически.
+        <span>∞ без лимита · 🔑 ключ · ⭐ подписка · 💳 платно · ⚠ неофициально</span></p>
+      <div id="provBox" class="prov-grid"></div>
+    </section>`;
+  $("#recAll").addEventListener("click", (e) => recommendProv("all", e.currentTarget));
   $("#composeForm").addEventListener("submit", (e) => { e.preventDefault(); startCustom(); });
   $("#topicsMore").addEventListener("click", () => refreshTopics(true));
   $("#topicsRefresh").addEventListener("click", () => refreshTopics(false));
-  renderTopics(); renderTopicsStatus(); renderHealth(); renderProjects();
+  renderTopics(); renderTopicsStatus(); renderHealth(); renderProjects(); renderUsage(); renderProviders();
+}
+
+/* ---------- лимиты ---------- */
+const clock = (t) => (t ? tf.format(new Date(t * 1000)) : "");
+function meter(pct, label) {
+  const cls = pct == null ? "" : pct <= 5 ? "err" : pct <= 25 ? "warn" : "ok";
+  return { cls, bar: `<div class="progress usage-bar ${cls}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct ?? 0}" aria-label="Осталось лимита: ${esc(label)}"><i style="transform:scaleX(${(pct ?? 0) / 100})"></i></div>` };
+}
+const pctText = (p) => (p == null ? "—" : `${p.toFixed(1).replace(".0", "")}%`);
+function renderUsage() {
+  const box = $("#usageBox"); if (!box) return;
+  const u = S.usage;
+  if (!u) { box.innerHTML = `<div class="skel skel-line"></div>`; return; }
+  const g = u.gemini || {};
+  $("#usageReset").textContent = g.reset_at ? `Gemini: сброс в ${clock(g.reset_at)}` : "";
+  const models = g.models || [];
+  const gem = models.map((m) => {
+    const { cls, bar } = meter(m.pct, m.label);
+    const projects = m.projects || [];
+    return `<details class="usage-row"><summary>
+        <div class="usage-top"><span class="t">Gemini · ${esc(m.label)}</span><code class="subtle" translate="no">${esc(m.model)}</code>
+          <b class="num ${cls}" style="margin-left:auto">${pctText(m.pct)}</b></div>${bar}
+        <div class="hint num">осталось ${nf.format(m.left)} из ${nf.format(m.limit)} · ${m.exact ? "точно (лимит сообщил Google)" : "оценка"} · сброс в ${clock(g.reset_at)}</div>
+      </summary>
+      <ul class="usage-keys">${projects.map((p) => `<li><span class="subtle">${p.exhausted ? "⛔" : "●"}</span>
+        <span class="truncate">${esc(p.label)} <span class="subtle num">(ключи ${p.keys.map((k) => `№${k}`).join(", ")})</span></span>
+        <span class="num">${p.exhausted ? `<span class="badge err">исчерпан до ${clock(g.reset_at)}</span>` : `${nf.format(p.left)} / ${nf.format(p.limit)}`}</span></li>`).join("")}</ul>
+    </details>`;
+  }).join("");
+  const rows = u.providers || [];
+  const api = rows.filter((r) => !r.unlimited).map((r) => {
+    const { cls, bar } = meter(r.pct, r.label);
+    return `<div class="usage-row"><div class="usage-top"><span class="t">${esc(r.label)}</span><code class="subtle" translate="no">${esc(r.model)}</code>
+        <b class="num ${cls}" style="margin-left:auto">${pctText(r.pct)}</b></div>${r.limit ? bar : ""}
+      <div class="hint num">${r.limit ? `осталось ${nf.format(r.left ?? 0)} из ${nf.format(r.limit)} · ${r.exact ? "точно (из ответа сервиса)" : "оценка"}` : `использовано ${nf.format(r.used)} · лимит неизвестен`}${r.reset_at ? ` · сброс в ${clock(r.reset_at)}` : ""}</div></div>`;
+  }).join("");
+  const local = rows.filter((r) => r.unlimited).map((r) => `<div class="usage-row"><div class="usage-top"><span class="t">${esc(r.label)}</span>
+      <code class="subtle" translate="no">${esc(r.model)}</code><b class="num ok" style="margin-left:auto">∞</b></div>
+      <div class="hint num">без лимита · сегодня ${nf.format(r.used)} ${plural(r.used, "запрос", "запроса", "запросов")}</div></div>`).join("");
+  if (!gem && !api && !local) {
+    box.innerHTML = `<p class="hint" style="margin:0">Сегодня запросов ещё не было${g.keys ? ` · ключей Gemini: ${g.keys}${g.projects ? `, проектов: ${g.projects}` : ""}` : ""}.</p>`;
+    return;
+  }
+  box.innerHTML = gem + api + local + `<p class="hint" style="margin:8px 0 0">Считаются запросы этой программы. Ключи одного проекта Google делят один лимит — укажите проект у ключей в окне «Ключи».</p>`;
+}
+
+/* ---------- источники ---------- */
+const PARTS = [["text", "Текст", "исследование, сценарий, промты"], ["voice", "Озвучка", "голос диктора"], ["images", "Кадры", "иллюстрации к ролику"]];
+const BADGE_CLS = { free: "ok", key: "", sub: "gold", paid: "warn", unofficial: "warn" };
+const OPT_OF = { ollama: ["ollama_model", "ollama_models", "Модель"], piper: ["piper_voice", "piper_voices", "Голос"],
+  silero: ["silero_speaker", "silero_speakers", "Голос"], edge: ["edge_voice", "edge_voices", "Голос"], comfyui: ["comfy_model", "comfy_models", "Модель"] };
+function provInfo(part, id) { return (S.providers?.catalog?.[part] || []).find((x) => x.id === id) || { id, label: id, badge_text: "" }; }
+function provReady(part, it) {
+  const P = S.providers, st = P.status || {}, ins = (st.install || {})[it.install] || {};
+  const route = (P.routes?.[part]?.chain || []).find((x) => x.id === it.id) || {};
+  const out = { ok: true, text: "", act: "" };
+  if (ins.running) return { ok: false, busy: true, text: ins.text || "Устанавливаю…", pct: ins.pct };
+  if (route.cool_until && route.cool_until * 1000 > Date.now()) {
+    return { ok: false, cool: true, text: `${route.reason || "лимит"} — пропускаю до ${clock(route.cool_until)}` };
+  }
+  if (it.secret && !it.optional_secret && !P.secrets[it.secret]) {
+    return { ok: false, text: "Нужен ключ", act: `<button class="btn btn-sm" type="button" data-keys="${esc(it.secret)}">Ввести ключ</button>` };
+  }
+  if (it.install) {
+    const s = st[it.install] || {};
+    if (it.id === "ollama") {
+      if (!s.installed) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "Ollama не установлена", err: !!ins.error, act: installBtn(it.install) };
+      if (!s.has_model) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : `Модель ${s.model} не скачана`, err: !!ins.error, act: installBtn(it.install, "Скачать модель") };
+      if (!s.running) out.text = "запустится автоматически";
+    } else if (!s.installed) {
+      return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "Не установлено", err: !!ins.error, act: installBtn(it.install) };
+    }
+    if (it.id === "chatterbox" && !s.sample) {
+      return { ok: false, text: "Нужен образец голоса 10–30 с", act: `<label class="btn btn-sm file-btn">Загрузить образец<input type="file" accept="audio/*" data-sample hidden></label>` };
+    }
+  }
+  if (route.active) out.active = true;
+  return out;
+}
+function installBtn(name, label = "Установить") { return `<button class="btn btn-sm" type="button" data-install="${esc(name)}">${label}</button>`; }
+
+function renderProviders() {
+  const box = $("#provBox"); if (!box) return;
+  const P = S.providers; if (!P) { box.innerHTML = `<div class="skel skel-line"></div><div class="skel skel-line"></div>`; return; }
+  $("#provHw").textContent = P.hw_text || "";
+  box.innerHTML = PARTS.map(([part, title, sub]) => {
+    const chain = P.settings.chains[part] || [];
+    const rest = (P.catalog[part] || []).filter((x) => !chain.includes(x.id));
+    const items = chain.map((id, i) => {
+      const it = provInfo(part, id), r = provReady(part, it);
+      const o = OPT_OF[id];
+      const optSel = o ? `<select class="prov-opt" data-opt="${o[0]}" aria-label="${o[2]} — ${esc(it.label)}">${Object.entries(P.options[o[1]] || {}).map(([k, v]) =>
+        `<option value="${esc(k)}" ${P.settings.opts[o[0]] === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>` : "";
+      const state = r.busy ? `<div class="prov-state"><span class="spinner" aria-hidden="true"></span><span class="hint">${esc(r.text)}</span></div>
+          ${r.pct != null ? `<div class="progress"><i style="transform:scaleX(${r.pct / 100})"></i></div>` : ""}`
+        : r.ok ? `<div class="prov-state"><span class="badge ${r.active ? "gold" : "ok"}"><span class="dot"></span>${r.active ? "сейчас работает" : "готово"}</span>${r.text ? `<span class="hint">${esc(r.text)}</span>` : ""}</div>`
+          : `<div class="prov-state"><span class="badge ${r.cool ? "warn" : r.err ? "err" : ""}"><span class="dot"></span>${r.cool ? "в лимите" : r.err ? "ошибка" : "не готово"}</span><span class="hint clamp-2" title="${esc(r.text)}">${esc(r.text)}</span>${r.act || ""}</div>`;
+      return `<li class="prov-item${i === 0 ? " primary" : ""}" data-part="${part}" data-id="${esc(id)}">
+        <div class="prov-head"><span class="prov-n num" aria-hidden="true">${i + 1}</span>
+          <div class="prov-name"><b>${esc(it.label)}</b><span class="badge prov-badge ${BADGE_CLS[it.badge] || ""}">${esc(it.badge_text)}</span></div>
+          <div class="prov-ctl">
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" data-move="-1" ${i === 0 ? "disabled" : ""} aria-label="Выше: ${esc(it.label)}">↑</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" data-move="1" ${i === chain.length - 1 ? "disabled" : ""} aria-label="Ниже: ${esc(it.label)}">↓</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" data-remove ${chain.length === 1 ? "disabled" : ""} aria-label="Убрать: ${esc(it.label)}">×</button>
+          </div></div>
+        <p class="hint prov-needs">${esc(it.needs)}</p>${optSel}${state}</li>`;
+    }).join("");
+    return `<section class="prov-part" aria-labelledby="pp-${part}">
+      <div class="section-h"><h3 id="pp-${part}" class="grow">${title}<span class="subtle">${sub}</span></h3>
+        <button class="btn btn-sm" type="button" data-rec="${part}">Рекомендовать</button></div>
+      <ol class="prov-chain" aria-label="${title}: порядок источников">${items}</ol>
+      ${rest.length ? `<div class="prov-add"><select aria-label="${title}: добавить запасной источник" data-add="${part}">
+        <option value="">+ добавить запасной источник…</option>${rest.map((x) => `<option value="${esc(x.id)}">${esc(x.label)} · ${esc(x.badge_text)}</option>`).join("")}</select></div>` : ""}
+      ${S.recWhy?.[part] ? `<p class="hint prov-why">${esc(S.recWhy[part])}</p>` : ""}
+    </section>`;
+  }).join("");
+  $$("[data-move]", box).forEach((b) => b.addEventListener("click", () => moveProv(b.closest(".prov-item"), +b.dataset.move)));
+  $$("[data-remove]", box).forEach((b) => b.addEventListener("click", () => moveProv(b.closest(".prov-item"), 0)));
+  $$("[data-add]", box).forEach((s) => s.addEventListener("change", () => {
+    if (!s.value) return; const part = s.dataset.add;
+    saveProviders({ chains: { [part]: [...S.providers.settings.chains[part], s.value] } }, "Запасной источник добавлен");
+  }));
+  $$("[data-opt]", box).forEach((s) => s.addEventListener("change", () => saveProviders({ opts: { [s.dataset.opt]: s.value } }, "Сохранено")));
+  $$("[data-install]", box).forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await post(`/api/providers/install/${b.dataset.install}`); toast("Установка началась — прогресс виден здесь", "info", { timeout: 3000 }); } catch (e) { fail(e); b.disabled = false; }
+  }));
+  $$("[data-keys]", box).forEach((b) => b.addEventListener("click", () => openKeys(b.dataset.keys)));
+  $$("[data-rec]", box).forEach((b) => b.addEventListener("click", () => recommendProv(b.dataset.rec, b)));
+  $$("[data-sample]", box).forEach((inp) => inp.addEventListener("change", () => uploadSample(inp)));
+}
+function moveProv(li, dir) {
+  const part = li.dataset.part, id = li.dataset.id;
+  const ch = [...S.providers.settings.chains[part]], i = ch.indexOf(id);
+  if (dir === 0) ch.splice(i, 1); else { const j = i + dir; if (j < 0 || j >= ch.length) return; [ch[i], ch[j]] = [ch[j], ch[i]]; }
+  saveProviders({ chains: { [part]: ch } }, dir === 0 ? "Источник убран из цепочки" : "Порядок изменён");
+}
+async function saveProviders(body, msg) {
+  try {
+    S.providers = await post("/api/providers", body); renderProviders();
+    const st = await api("/api/state"); S.state = st; S.usage = st.usage; renderUsage();
+    if (msg) toast(msg, "success", { timeout: 1800 });
+    renderTopics(); renderTopicsStatus();
+  } catch (e) { fail(e); renderProviders(); }
+}
+async function recommendProv(part, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Подбираю…"; }
+  try {
+    const r = await post("/api/providers/recommend", { part: part === "all" ? null : part, apply: true });
+    S.recWhy = { ...(S.recWhy || {}), ...r.why };
+    if (r.snapshot) S.providers = r.snapshot;
+    renderProviders();
+    toast(part === "all" ? "Подобрал источники под этот компьютер" : "Цепочка подобрана под этот компьютер", "success", { timeout: 2500 });
+  } catch (e) { fail(e); } finally { if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = part === "all" ? "Рекомендовать всё" : "Рекомендовать"; } }
+}
+async function uploadSample(inp) {
+  const f = inp.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const r = await fetch("/api/providers/voice_sample", { method: "POST", body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(j.detail || `Ошибка ${r.status}`), { fix: j.fix });
+    S.providers = j.snapshot; renderProviders(); toast(`Образец голоса сохранён (${j.seconds} с)`, "success");
+  } catch (e) { fail(e); }
+}
+function chainLine() {
+  const P = S.providers; if (!P) return "";
+  return PARTS.map(([part, title]) => `${title}: ${P.settings.chains[part].map((id) => provInfo(part, id).label).join(" → ")}`).join(" · ");
 }
 
 function renderTopicsStatus() {
   const box = $("#topicsStatus"); if (!box) return;
   const st = S.topicsStatus || {};
   if (st.running) {
-    box.innerHTML = `<div class="search-status"><span class="spinner" aria-hidden="true"></span><span>${esc(st.stage || "Ищу темы…")}</span>
+    box.innerHTML = `<div class="search-status"><span class="spinner" aria-hidden="true"></span><span>${esc(st.stage || "Ищу темы…")}${st.provider ? ` · ${esc(provInfo("text", st.provider).label)}` : ""}</span>
       <span class="subtle num" style="margin-left:auto" data-since="${st.started || 0}"></span></div>`;
   } else if (st.error) {
+    const alts = st.alternatives || [];
     box.innerHTML = `<div class="alert"><b>${esc(st.error)}</b><span class="muted">${esc(st.fix || "")}</span>
       <div class="row"><button class="btn btn-sm" type="button" id="topicsRetry">Повторить поиск</button>
+      ${alts.length ? `<span class="hint">Искать через другой источник:</span>${alts.map((a) => `<button class="btn btn-sm" type="button" data-alt="${esc(a.id)}">${esc(a.label)}</button>`).join("")}` : ""}
       <button class="btn btn-sm btn-ghost" type="button" id="topicsKeys">Ключи</button></div></div>`;
     $("#topicsRetry").addEventListener("click", () => refreshTopics(false));
-    $("#topicsKeys").addEventListener("click", openKeys);
+    $("#topicsKeys").addEventListener("click", () => openKeys());
+    $$("[data-alt]", box).forEach((b) => b.addEventListener("click", () => refreshTopics(false, b.dataset.alt)));
   } else if (S.topicsUpdated) {
     box.innerHTML = `<p class="hint" style="margin:-6px 0 10px">Обновлено ${esc(dtf.format(new Date(S.topicsUpdated)))} · учтены уже сделанные темы канала</p>`;
   } else box.innerHTML = "";
@@ -188,10 +371,12 @@ function renderTopics() {
         <div class="skel skel-line" style="width:70%;height:18px"></div><div class="skel skel-line" style="width:40%"></div>
         <div class="skel skel-line"></div><div class="skel skel-line" style="width:85%"></div><div class="skel skel-line" style="width:60%"></div></div>`).join("");
     } else if (S.state && S.state.missing_secrets.length) {
-      grid.innerHTML = `<div class="card empty" style="grid-column:1/-1"><b>Нужен ключ Google AI Studio</b>
-        <span>С ключом программа сама найдёт актуальные темы через Google.</span>
-        <button class="btn btn-primary" type="button" id="emptyKeys">Добавить ключи</button></div>`;
-      $("#emptyKeys").addEventListener("click", openKeys);
+      grid.innerHTML = `<div class="card empty" style="grid-column:1/-1"><b>Нужен источник текста</b>
+        <span>Добавьте ключ Gemini (или бесплатный ключ Groq) — либо установите Ollama в «Источниках», тогда ключи не нужны.</span>
+        <div class="row" style="justify-content:center"><button class="btn btn-primary" type="button" id="emptyKeys">Добавить ключи</button>
+        <button class="btn" type="button" id="emptySources">Открыть «Источники»</button></div></div>`;
+      $("#emptyKeys").addEventListener("click", () => openKeys());
+      $("#emptySources").addEventListener("click", () => $("#sourcesCard").scrollIntoView({ behavior: reduced ? "auto" : "smooth" }));
     } else grid.innerHTML = `<div class="card empty" style="grid-column:1/-1">Тем пока нет. Нажмите «Обновить».</div>`;
     return;
   }
@@ -264,8 +449,9 @@ function renderProjects() {
 }
 
 /* ---------- действия: темы и старт ---------- */
-async function refreshTopics(more) {
-  try { await post(`/api/topics/refresh${more ? "?more=true" : ""}`); } catch (e) { fail(e); }
+async function refreshTopics(more, provider) {
+  const q = new URLSearchParams(); if (more) q.set("more", "true"); if (provider) q.set("provider", provider);
+  try { await post(`/api/topics/refresh${q.toString() ? `?${q}` : ""}`); } catch (e) { fail(e); }
 }
 
 async function startCustom() {
@@ -290,23 +476,23 @@ function openStart(o) {
   const sel = $("#startMinutes");
   const want = o.minutes || S.state?.defaults?.target_minutes || 15;
   sel.value = [...sel.options].map((x) => +x.value).reduce((a, b) => Math.abs(b - want) < Math.abs(a - want) ? b : a, 15);
-  $("#startBackend").value = S.state?.defaults?.image_backend || "gemini_api";
+  $("#startChain").textContent = chainLine();
   updateEstimate();
   openDlg($("#dlgStart"));
 }
 function updateEstimate() {
   const m = +$("#startMinutes").value;
   const frames = Math.round(m * (S.state?.defaults?.wpm || 150) / 15);
-  $("#startEstimate").textContent = `≈ ${nf.format(m * (S.state?.defaults?.wpm || 150))} слов, ${frames} ${plural(frames, "кадр", "кадра", "кадров")}. Ориентировочно ${fmtDur(estimateTotal(m, frames, $("#startBackend").value))} работы.`;
+  $("#startEstimate").textContent = `≈ ${nf.format(m * (S.state?.defaults?.wpm || 150))} слов, ${frames} ${plural(frames, "кадр", "кадра", "кадров")}. Ориентировочно ${fmtDur(estimateTotal(m, frames, S.providers?.settings?.chains?.images?.[0]))} работы.`;
 }
 $("#startMinutes").addEventListener("change", updateEstimate);
-$("#startBackend").addEventListener("change", updateEstimate);
+$("#startSources").addEventListener("click", () => { closeDlg($("#dlgStart")); if (S.route.name !== "home") location.hash = "#/"; setTimeout(() => $("#sourcesCard")?.scrollIntoView({ behavior: reduced ? "auto" : "smooth" }), 80); });
 $("#startGo").addEventListener("click", async () => {
   const o = S.pendingStart; if (!o) return;
   const title = $("#startTitle").value.trim();
   const btn = $("#startGo"); btn.disabled = true; btn.textContent = "Запускаю…";
   try {
-    const body = { target_minutes: +$("#startMinutes").value, image_backend: $("#startBackend").value };
+    const body = { target_minutes: +$("#startMinutes").value };
     if (o.topic_id && title === o.title) body.topic_id = o.topic_id; else { body.custom_title = title; body.raw_title = o.raw || title; }
     const r = await post("/api/start", body);
     closeDlg($("#dlgStart"));
@@ -375,7 +561,8 @@ function stageState(snap, k) {
 }
 
 const EXPECT = (k, m, frames, backend, chatcut) => ({
-  research: 60, script: 25 + 7 * m, prompts: 10 + 1.2 * m, images: backend === "flow" ? 25 * frames : 20 + frames * 3,
+  research: 60, script: 25 + 7 * m, prompts: 10 + 1.2 * m,
+  images: ({ flow: 25, pollinations: 17, comfyui: 12, hf: 8, none: 0.2 }[backend] ?? 3) * frames + 20,
   voice: 15 + 4 * m, materials: 12, edit: chatcut ? 150 + 12 * m : 3, verify: 15 + 3 * m,
 }[k]);
 function estimateTotal(m, frames, backend) { return S.stages.reduce((a, [k]) => a + EXPECT(k, m, frames, backend, true), 0); }
@@ -417,7 +604,7 @@ function applySnapshot(snap) {
   const [label, cls] = STATUS[snap.status] || [snap.status, ""];
   $("#prodStatus").innerHTML = `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
   const m = +snap.target_minutes || 0;
-  $("#prodMeta").textContent = `${m} мин · ${snap.image_backend === "flow" ? "Google Flow" : "Gemini API"}`;
+  $("#prodMeta").textContent = `${m} мин · кадры: ${provInfo("images", snap.image_backend || "gemini_api").label}`;
   // действия
   const busyHere = S.state && S.state.busy && S.state.current && S.state.current.id === snap.id;
   const exportFile = (snap.result || {}).export_chatcut || (snap.result || {}).export_local;
@@ -464,7 +651,7 @@ function applySnapshot(snap) {
     <div class="row"><button class="btn btn-primary btn-sm" type="button" id="errResume">Продолжить проект</button>
     <button class="btn btn-sm" type="button" id="errKeys">Ключи</button></div></div>` : "";
   $("#errResume") && $("#errResume").addEventListener("click", () => resume(snap.id));
-  $("#errKeys") && $("#errKeys").addEventListener("click", openKeys);
+  $("#errKeys") && $("#errKeys").addEventListener("click", () => openKeys());
   // действие пользователя
   const ua = snap.user_action; const dlg = $("#dlgAction");
   if (ua && snap.status === "waiting_user") {
@@ -623,24 +810,62 @@ function renderKeysPill() {
   pill.setAttribute("aria-label", `Ключи Gemini: ${k.text}`);
   if ($("#dlgKeys").open) renderKeysList();
 }
+const EXTRA_KEYS = [
+  ["GROQ_API_KEY", "Groq", "бесплатно ≈1 000 запросов/день к Llama 3.3 70B", "https://console.groq.com/keys"],
+  ["OPENROUTER_API_KEY", "OpenRouter", "бесплатные модели: 50 запросов/день (1 000 после пополнения на $10)", "https://openrouter.ai/keys"],
+  ["MISTRAL_API_KEY", "Mistral", "бесплатный тариф Experiment", "https://console.mistral.ai/api-keys"],
+  ["CEREBRAS_API_KEY", "Cerebras", "бесплатный пробный тариф", "https://cloud.cerebras.ai"],
+  ["GEMINI_PAID_API_KEY", "Gemini с оплатой", "ключ проекта с включённым биллингом — без дневных лимитов, платно", "https://aistudio.google.com/apikey"],
+  ["HF_TOKEN", "Hugging Face", "кадры FLUX через бесплатные кредиты", "https://huggingface.co/settings/tokens"],
+  ["POLLINATIONS_TOKEN", "Pollinations", "необязательно: ускоряет бесплатные кадры", "https://auth.pollinations.ai"],
+  ["YOUTUBE_API_KEY", "YouTube Data API", "необязательно: видео канала и конкурентов для тем", "https://console.cloud.google.com/apis/library/youtube.googleapis.com"],
+];
 function renderKeysList() {
   const k = S.keys || { keys: [] };
   $("#keysSummary").innerHTML = `<span class="badge ${k.invalid ? "warn" : "ok"}">${esc(k.text || "")}</span>${k.next_reset ? `<span class="hint">ближайший сброс квоты ≈ ${tf.format(new Date(k.next_reset * 1000))}</span>` : ""}`;
   $("#keysList").innerHTML = (k.keys || []).map((x) => `<li><span class="subtle num">№${x.index}</span><code class="truncate" translate="no">${esc(x.mask)}</code>
+    <input class="key-proj" data-fp="${esc(x.fp || "")}" value="${esc(x.project || "")}" placeholder="проект" aria-label="Проект Google для ключа №${x.index}" autocomplete="off" spellcheck="false">
     ${x.status === "ok" ? `<span class="badge ok">работает</span>` : x.status === "quota" ? `<span class="badge warn">квота до ${x.until ? tf.format(new Date(x.until * 1000)) : "…"}</span>` :
-      x.status === "invalid" ? `<span class="badge err" title="${esc(x.reason)}">неверный</span>` : `<span class="badge">не проверен</span>`}</li>`).join("") || `<li><span></span><span class="muted">Ключей пока нет</span><span></span></li>`;
+      x.status === "invalid" ? `<span class="badge err" title="${esc(x.reason)}">неверный</span>` : `<span class="badge">не проверен</span>`}</li>`).join("") || `<li class="empty-li"><span class="muted">Ключей пока нет</span></li>`;
   $("#keysRemoveBad").disabled = !k.invalid;
+  $$(".key-proj").forEach((inp) => inp.addEventListener("change", saveProjects));
+  const sec = S.providers?.secrets || {};
+  $("#extraKeys").innerHTML = EXTRA_KEYS.map(([id, name, what, url]) => `<div class="field extra-key">
+    <label for="xk-${id}">${esc(name)} ${sec[id] ? `<span class="badge ok">сохранён</span>` : ""}</label>
+    <input id="xk-${id}" data-secret="${id}" type="password" autocomplete="off" spellcheck="false" placeholder="${sec[id] ? "•••••••• (оставьте пустым, чтобы не менять)" : "вставьте ключ…"}">
+    <span class="hint">${esc(what)} · <a href="${url}" target="_blank" rel="noopener noreferrer">где взять</a>${sec[id] ? ` · <button class="linkbtn" type="button" data-clear="${id}">удалить</button>` : ""}</span></div>`).join("");
+  $$("[data-clear]").forEach((b) => b.addEventListener("click", async () => {
+    try { const r = await post("/api/keys/extra", { values: { [b.dataset.clear]: "" } }); S.providers.secrets = r.secrets; renderKeysList(); renderProviders(); toast("Ключ удалён", "success"); } catch (e) { fail(e); }
+  }));
 }
-function openKeys() { renderKeysList(); openDlg($("#dlgKeys")); setTimeout(() => $("#keysText").focus(), 60); }
-$("#keysPill").addEventListener("click", openKeys);
+async function saveProjects() {
+  const labels = Object.fromEntries($$(".key-proj").filter((i) => i.dataset.fp).map((i) => [i.dataset.fp, i.value.trim()]));
+  try { const r = await post("/api/keys/projects", { labels }); S.keys = r.keys; S.usage = r.usage; renderUsage(); toast("Проекты ключей сохранены", "success", { timeout: 1800 }); } catch (e) { fail(e); }
+}
+function openKeys(focus) {
+  renderKeysList(); openDlg($("#dlgKeys"));
+  const el = typeof focus === "string" && focus !== "GEMINI_API_KEY" ? $(`#xk-${focus}`) : $("#keysText");
+  setTimeout(() => { el?.focus(); if (el && el !== $("#keysText")) el.scrollIntoView({ block: "center" }); }, 60);
+}
+$("#keysPill").addEventListener("click", () => openKeys());
+$("#sourcesBtn").addEventListener("click", () => {
+  if (S.route.name !== "home") location.hash = "#/";
+  setTimeout(() => $("#sourcesCard")?.scrollIntoView({ behavior: reduced ? "auto" : "smooth" }), 80);
+});
 $("#keysSave").addEventListener("click", async () => {
-  const btn = $("#keysSave"); btn.disabled = true; btn.textContent = "Проверяю ключи…";
+  const btn = $("#keysSave"); btn.disabled = true; btn.textContent = "Сохраняю…";
   try {
-    S.keys = await post("/api/keys", { text: $("#keysText").value, replace: $("#keysReplace").checked, YOUTUBE_API_KEY: $("#ytKey").value });
-    $("#keysText").value = ""; $("#ytKey").value = ""; $("#keysReplace").checked = false;
-    renderKeysPill(); renderKeysList(); toast(`Ключи сохранены: ${S.keys.text}`, "success");
-    const st = await api("/api/state"); S.state = st; if (S.route.name === "home") { renderTopics(); renderTopicsStatus(); }
-  } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = "Сохранить ключи"; }
+    const extra = Object.fromEntries($$("[data-secret]").filter((i) => i.value.trim()).map((i) => [i.dataset.secret, i.value.trim()]));
+    if (Object.keys(extra).length) { const r = await post("/api/keys/extra", { values: extra }); if (S.providers) S.providers.secrets = r.secrets; }
+    if ($("#keysText").value.trim() || $("#keysReplace").checked) {
+      btn.textContent = "Проверяю ключи…";
+      S.keys = await post("/api/keys", { text: $("#keysText").value, replace: $("#keysReplace").checked });
+      $("#keysText").value = ""; $("#keysReplace").checked = false;
+      toast(`Ключи сохранены: ${S.keys.text}`, "success");
+    } else if (Object.keys(extra).length) toast("Ключи сохранены", "success");
+    renderKeysPill(); renderKeysList(); renderProviders();
+    const st = await api("/api/state"); S.state = st; S.providers = st.providers; if (S.route.name === "home") { renderTopics(); renderTopicsStatus(); renderProviders(); }
+  } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
 });
 $("#keysCheck").addEventListener("click", async () => {
   const btn = $("#keysCheck"); btn.disabled = true; btn.textContent = "Проверяю…";
@@ -676,6 +901,9 @@ function connect() {
   on("topics_status", (d) => { S.topicsStatus = d; renderTopicsStatus(); if (!S.topics.length) renderTopics(); });
   on("topics", () => loadTopics());
   on("keys", (d) => { S.keys = d; renderKeysPill(); });
+  on("usage", (d) => { S.usage = d; renderUsage(); });
+  on("providers", (d) => { S.providers = d; renderProviders(); });
+  ["text", "voice", "images"].forEach((part) => on(`route_${part}`, (d) => { if (S.providers) { S.providers.routes[part] = d; renderProviders(); } }));
   on("health", (d) => { S.health = d; renderHealth(); });
   on("toast", (d) => toast(d.message, d.level, { fix: d.fix }));
   on("frame", onFrame);
@@ -688,6 +916,7 @@ async function boot(again) {
   try {
     const st = await api("/api/state");
     S.state = st; S.stages = st.stages; S.keys = st.keys; S.health = st.health; S.topicsStatus = st.topics_status || {};
+    S.usage = st.usage; S.providers = st.providers;
     $("#channelLine").textContent = `канал «${st.channel || "ИСТОРИК"}»${st.mock ? " · тестовый режим" : ""}`;
     renderKeysPill();
   } catch (e) { fail(e); return; }
@@ -695,7 +924,7 @@ async function boot(again) {
   if (!again) render();
   await Promise.all([loadTopics(), loadProjects()]);
   if (again && S.route.name === "project") renderProjectView(S.route.id);
-  if (!again && S.state.missing_secrets.length) setTimeout(openKeys, 400);
+  if (!again && S.state.missing_secrets.length) setTimeout(() => openKeys(), 400);
 }
 
 boot(false).then(connect);

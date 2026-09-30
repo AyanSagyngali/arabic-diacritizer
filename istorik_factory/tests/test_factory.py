@@ -35,6 +35,8 @@ def isolated(tmp_path, monkeypatch):
     cfg["script"]["target_minutes"] = 2
     for k in ("projects", "data"):
         cfg.path(k).mkdir(parents=True, exist_ok=True)
+    from factory import settings
+    settings.apply(cfg)  # источники по умолчанию (data/settings.json временной папки пуст)
     from factory.core import pipeline
     pipeline.runner = pipeline.Runner()
     yield cfg
@@ -66,13 +68,14 @@ def read_frames(p):
     return read_json(p.prompts_dir / "frames.json")["count"]
 
 
-def test_resume_after_stop_and_frame_failure(monkeypatch):
+def test_resume_after_stop_and_frame_failure(monkeypatch, isolated):
     from factory.core.pipeline import Runner, StopRequested
-    from factory.stages import images
+    from factory.providers import images
+    isolated["providers"]["chains"]["images"] = ["gemini_api"]  # без запасных — сбой кадра виден как сбой
     calls = {"n": 0}
-    orig = images.MockBackend.generate
+    orig = images.MockImages.generate
 
-    def flaky(self, frame):
+    def flaky(self, frame, deadline=None):
         calls["n"] += 1
         if frame["frame_id"] == "004" and calls["n"] < 8:
             raise RuntimeError("Flow ERROR (симуляция)")
@@ -80,7 +83,7 @@ def test_resume_after_stop_and_frame_failure(monkeypatch):
             raise StopRequested()  # «компьютер выключили» посреди генерации кадров
         return orig(self, frame)
 
-    monkeypatch.setattr(images.MockBackend, "generate", flaky)
+    monkeypatch.setattr(images.MockImages, "generate", flaky)
     p = new_project()
     Runner().run_sync(p)
     assert p.data["status"] == "stopped"
@@ -90,7 +93,7 @@ def test_resume_after_stop_and_frame_failure(monkeypatch):
     assert done_before and len(done_before) < read_frames(p)
     assert "004 ERROR" in (p.root / "08_logs" / "flow.log").read_text(encoding="utf-8")
 
-    monkeypatch.setattr(images.MockBackend, "generate", orig)
+    monkeypatch.setattr(images.MockImages, "generate", orig)
     from factory.core.project import Project
     p2 = Project.load(p.data["id"])
     assert p2.first_unfinished_stage() == "images"
@@ -267,6 +270,7 @@ FLOW_PROJECT = """<!doctype html><html><body>
 <script>
 let n = 0;
 function gen(){ const t = document.querySelector('textarea').value; n++;
+  if (t.includes('QUOTA')) { setTimeout(()=>{document.body.insertAdjacentHTML('beforeend','<p>Something went wrong: you have reached your daily limit</p>')}, 300); return; }
   if (t.includes('BLOCKED')) { setTimeout(()=>{document.body.insertAdjacentHTML('beforeend','<p>Couldn\\'t generate image</p>')}, 300); return; }
   setTimeout(()=>{ const i = document.createElement('img'); i.src = '/img/' + n + '.png?p=' + encodeURIComponent(t.slice(0,20));
     document.getElementById('grid').prepend(i); }, 800); }
@@ -303,6 +307,26 @@ def _flow_server(port):
     return srv
 
 
+def test_flow_not_logged_in_falls_back(tmp_path, monkeypatch, isolated):
+    """Нет входа в Google, а в цепочке есть запасные источники → Flow пропускается сразу, производство не ждёт."""
+    from factory.core.errors import ProviderUnavailable
+    from factory.core.pipeline import Context, Runner
+    from factory.flow import browser
+    from factory.flow.generator import FlowBackend
+
+    class Page:
+        url = "https://accounts.google.com/ServiceLogin"
+
+        def wait_for_timeout(self, ms):
+            pass
+    monkeypatch.setattr(browser, "page_for", lambda part, url: Page())
+    isolated["providers"]["chains"]["images"] = ["flow", "pollinations", "none"]
+    t = time.time()
+    with pytest.raises(ProviderUnavailable):
+        FlowBackend(Context(new_project(), Runner())).setup()
+    assert time.time() - t < 5
+
+
 def test_flow_browser_automation(tmp_path, monkeypatch):
     port = _free_port()
     srv = _flow_server(port)
@@ -337,6 +361,10 @@ def test_flow_browser_automation(tmp_path, monkeypatch):
         assert len(set(got)) == 3  # каждому кадру — своё новое изображение
         with pytest.raises(FlowError):
             fb.generate({"frame_id": "004", "number": 4, "prompt": "BLOCKED prompt for the content filter test"})
+        from factory.core.errors import ProviderQuota
+        with pytest.raises(ProviderQuota) as e:  # лимит подписки → источник «в лимите» до завтра, кадры делает следующий
+            fb.generate({"frame_id": "005", "number": 5, "prompt": "QUOTA prompt for the daily limit test"})
+        assert e.value.reset_at > time.time() + 60
     finally:
         browser.close()
         srv.shutdown()

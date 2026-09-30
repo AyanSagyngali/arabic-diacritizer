@@ -53,7 +53,7 @@ class Key:
         return f"№{self.index} ({mask(self.value)})"
 
     def public(self) -> dict:
-        return {"index": self.index, "mask": mask(self.value), "status": self.status, "reason": self.reason,
+        return {"index": self.index, "fp": fingerprint(self.value), "mask": mask(self.value), "status": self.status, "reason": self.reason,
                 "until": self.until if self.status == "quota" else None, "uses": self.uses, "auth": self.auth,
                 "kind": "AQ" if self.value.startswith("AQ.") else ("AIza" if self.value.startswith("AIza") else "other")}
 

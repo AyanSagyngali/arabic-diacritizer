@@ -43,6 +43,8 @@ def server(tmp_path_factory):
     cfg["app"]["auto_topics"] = False
     for k in ("projects", "data"):
         cfg.path(k).mkdir(parents=True, exist_ok=True)
+    from factory import settings
+    settings.apply(cfg)
     import uvicorn
     from factory.web.server import app
     port = _port()
@@ -202,6 +204,99 @@ def test_all_states(server, browser, width):
         el.type === 'checkbox' || el.labels?.length || el.getAttribute('aria-label'))""")
     assert pg.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth + 1"), "горизонтальная прокрутка"
     assert not errors, errors
+
+
+def wide_elements(pg):
+    return pg.evaluate("""() => { const W = window.innerWidth; return [...document.querySelectorAll('body *')]
+        .filter(e => { const r = e.getBoundingClientRect(); return r.right > W + 1 && r.width > 0 && !e.closest('.aurora'); })
+        .filter(e => ![...e.children].some(c => c.getBoundingClientRect().right > W + 1))
+        .slice(0, 8).map(e => `${e.tagName}.${e.className} → ${Math.round(e.getBoundingClientRect().right)}: ${(e.textContent || '').slice(0, 50)}`); }""")
+
+
+def no_hscroll(pg):
+    return pg.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth + 1")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_sources_and_limits_states(server, browser, width):
+    """Карточки «Источники» и «Лимиты» во всех состояниях: готово, нужен ключ, установка с прогрессом, ошибка установки,
+    в лимите до сброса, «Рекомендовать», смена порядка, добавление запасного, лимиты точные/оценка/∞, окно ключей."""
+    import time as _t
+
+    from factory.core import events
+    from factory.providers import install, snapshot
+    from factory.providers.limits import full_summary, limits
+    from factory.topics import engine as topics
+    pg, errors = page(browser, width)
+    pg.goto(server["url"])
+    pg.wait_for_selector(".prov-item")
+    assert pg.locator("#sourcesCard .prov-part").count() == 3
+    assert pg.locator("text=Ввести ключ").count() >= 1  # Gemini без ключа (тестовый режим)
+
+    # установка с прогрессом, затем ошибка установки
+    install._state["piper"] = {"running": True, "text": "Скачиваю голос Piper… 42%", "pct": 42}
+    events.publish("providers", snapshot())
+    pg.wait_for_selector("text=Скачиваю голос Piper")
+    shot(pg, "09_sources_installing", width)
+    install._state["piper"] = {"running": False, "error": "нет доступа к huggingface.co — проверьте интернет"}
+    events.publish("providers", snapshot())
+    pg.wait_for_selector("text=нет доступа к huggingface.co")
+    install._state.pop("piper", None)
+
+    # источник упёрся в лимит → «в лимите до …»
+    from factory.providers import voice
+    r = voice.router()
+    r.cool["gemini"] = (_t.time() + 3600, "Квота Gemini исчерпана")
+    events.publish("route_voice", r.state())
+    pg.wait_for_selector("text=в лимите")
+    r.cool.clear()
+    events.publish("route_voice", r.state())
+
+    # порядок: второй источник текста вверх
+    first = pg.locator('.prov-item[data-part="text"]').first.get_attribute("data-id")
+    pg.locator('.prov-item[data-part="text"]').nth(1).get_by_role("button", name="Выше").click()
+    pg.wait_for_function(f"document.querySelector('.prov-item[data-part=\"text\"]').dataset.id !== '{first}'")
+    # добавить запасной источник озвучки
+    pg.select_option('[data-add="voice"]', "silero")
+    pg.wait_for_selector('.prov-item[data-part="voice"][data-id="silero"]')
+    # «Рекомендовать» для кадров
+    pg.locator('[data-rec="images"]').click()
+    pg.wait_for_selector(".prov-why")
+    shot(pg, "10_sources", width)
+    assert pg.locator('.prov-item[data-part="images"]').last.get_attribute("data-id") == "none"
+
+    # лимиты: точный (Groq), оценка (OpenRouter), локальный ∞
+    limits().record("groq", "llama-3.3-70b-versatile", {"x-ratelimit-limit-requests": "1000", "x-ratelimit-remaining-requests": "640"})
+    limits().record("openrouter", "deepseek/deepseek-chat:free", {})
+    limits().record_local("piper", "ru_RU-denis-medium")
+    events.publish("usage", full_summary())
+    pg.wait_for_selector("#usageBox >> text=осталось 640 из 1")
+    assert pg.locator("#usageBox >> text=оценка").count() >= 1 and pg.locator("#usageBox >> text=∞").count() >= 1
+    pg.locator("#limitsCard").scroll_into_view_if_needed()
+    shot(pg, "11_limits", width)
+
+    # поиск тем не уложился в 90 с → «Искать через другой источник»
+    topics._set(running=False, error="Поиск тем не уложился в 90 с", fix="Источник отвечает медленно.",
+                alternatives=[{"id": "groq", "label": "Groq"}, {"id": "ollama", "label": "Ollama"}])
+    pg.wait_for_selector("[data-alt=groq]")
+    topics._set(error=None, alternatives=[])
+
+    # окно ключей: подписи проектов и ключи других сервисов
+    pg.click("#keysPill")
+    pg.wait_for_selector("#dlgKeys[open] #xk-GROQ_API_KEY")
+    shot(pg, "12_keys_dialog", width)
+    pg.keyboard.press("Escape")
+
+    assert no_hscroll(pg), wide_elements(pg)
+    unnamed = pg.evaluate("""() => [...document.querySelectorAll('button')].filter(b => b.offsetParent && !(b.innerText.trim() || b.getAttribute('aria-label'))).length""")
+    assert unnamed == 0
+    assert pg.evaluate("""() => [...document.querySelectorAll('input,select,textarea')].every(el =>
+        el.type === 'checkbox' || el.type === 'file' || el.labels?.length || el.getAttribute('aria-label'))""")
+    assert not errors, errors
+    # вернуть настройки по умолчанию для других тестов
+    from factory import settings
+    from factory.providers.catalog import DEFAULT_CHAINS
+    settings.save(server["cfg"], {"chains": dict(DEFAULT_CHAINS)})
 
 
 def test_guidelines_static_audit():

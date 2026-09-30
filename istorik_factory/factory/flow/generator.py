@@ -13,11 +13,29 @@ import re
 import time
 
 from ..config import config
+from ..core.errors import ProviderQuota, ProviderUnavailable
 from . import browser
 
 LOGIN_HINTS = ("accounts.google.com", "signin", "ServiceLogin")
 ERROR_RX = re.compile(r"(couldn.?t generate|could not generate|something went wrong|try again|policy|не удалось|ошибка|"
                       r"нарушает|unable to generate|failed)", re.I)
+
+QUOTA_RX = re.compile(r"(reached (your|the) (daily )?limit|out of credits|no credits|not enough credits|quota|limit reached|"
+                      r"лимит исчерпан|достигли лимита|закончились кредиты|недостаточно кредитов)", re.I)
+
+
+def _next_day() -> float:
+    import datetime as dt
+    now = dt.datetime.now()
+    return (now + dt.timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0).timestamp()
+
+
+def _has_fallback() -> bool:
+    """Есть ли в цепочке кадров другой настоящий источник после Flow (не считая титульных карточек)."""
+    ch = ((config().get("providers") or {}).get("chains") or {}).get("images") or ["flow"]
+    after = ch[ch.index("flow") + 1:] if "flow" in ch else []
+    return any(x != "none" for x in after)
+
 
 JS_IMAGES = """() => Array.from(document.querySelectorAll('img')).filter(i => i.complete && i.naturalWidth >= 512 && i.naturalHeight >= 256)
   .map(i => ({src: i.currentSrc || i.src, w: i.naturalWidth, h: i.naturalHeight}))"""
@@ -55,10 +73,15 @@ class FlowBackend:
         flow_state = p.data.setdefault("flow", {})
         url = flow_state.get("project_url") or self.cfg.at("images.flow.url")
         self.ctx.log.log(f"Opening Flow: {url}", "flow")
-        self.page = browser.page_for("labs.google/fx", url)
+        try:
+            self.page = browser.page_for("labs.google/fx", url)
+        except Exception as e:  # браузер не запустился — это недоступность источника, а не ошибка кадра
+            raise ProviderUnavailable(f"Flow: не удалось открыть браузер ({str(e)[:160]})") from e
         self.page.wait_for_timeout(3000)
 
         if not self._ready():
+            if _has_fallback():  # не держать производство: кадры сделает следующий источник, а вход можно выполнить позже
+                raise ProviderUnavailable("Flow: не выполнен вход в Google — нажмите «Войти» в «Готовности системы»")
             self.ctx.require_user(
                 "Откройте окно браузера ISTORIK (Google Flow) и войдите в свой аккаунт Google. "
                 "После входа нажмите «Продолжить».", done=self._ready)
@@ -147,6 +170,12 @@ class FlowBackend:
         except Exception:
             return 0
 
+    def _quota_hit(self) -> bool:
+        try:
+            return bool(QUOTA_RX.search(self.page.locator("body").inner_text(timeout=2000)))
+        except Exception:
+            return False
+
     def generate(self, frame: dict) -> bytes:
         if self.page is None:
             self.setup()
@@ -178,7 +207,8 @@ class FlowBackend:
             self.ctx.check_stop()
             pg.wait_for_timeout(2500)
             if any(h in (pg.url or "") for h in LOGIN_HINTS):
-                raise FlowError("сессия Google завершилась (требуется вход)")
+                self.page = None
+                raise ProviderUnavailable("Flow: сессия Google завершилась — нужен повторный вход")
             new = [i for i in self._images() if i["src"] not in before]
             if new:
                 stable = stable + 1 if [n["src"] for n in new] == [n["src"] for n in last_new] else 0
@@ -186,6 +216,8 @@ class FlowBackend:
                 if stable >= 2:
                     break
             elif self._error_count() > errors_before:
+                if self._quota_hit():
+                    raise ProviderQuota("Flow: лимит генераций по подписке на сегодня исчерпан", _next_day())
                 raise FlowError("Flow сообщил об ошибке генерации (возможно, фильтр контента)")
         if not last_new:
             raise FlowError("таймаут ожидания изображения")

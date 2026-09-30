@@ -41,6 +41,13 @@ def slugify(text: str, max_len: int = 60) -> str:
     return s[:max_len].rstrip("-") or "video"
 
 
+def _recover(root: Path) -> None:
+    """project.json пропал (сбой старой версии в момент записи) — восстановить из резервной копии."""
+    f, bak = root / "project.json", root / "project.json.bak"
+    if not f.exists() and bak.exists():
+        shutil.copyfile(bak, f)
+
+
 class Project:
     """Проект = папка projects/<дата>_<slug>/ с project.json и папками этапов."""
 
@@ -97,6 +104,7 @@ class Project:
         if "/" in project_id or "\\" in project_id or project_id.startswith("."):
             raise FileNotFoundError(project_id)
         root = config().path("projects") / project_id
+        _recover(root)
         if not (root / "project.json").exists():
             raise FileNotFoundError(project_id)
         return cls(root)
@@ -106,6 +114,8 @@ class Project:
         out = []
         base = config().path("projects")
         for d in sorted(base.iterdir(), reverse=True):
+            if d.is_dir():
+                _recover(d)
             f = d / "project.json"
             if d.name == TRASH or not f.exists():
                 continue

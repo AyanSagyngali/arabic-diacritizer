@@ -49,17 +49,22 @@ def run(ctx) -> None:
     files = [c["file"] for c in chunks]
     ch.add("Аудио", "все части на месте", all((p.voice_dir / f).exists() for f in files), f"{len(files)} частей")
     ch.add("Аудио", "правильный порядок частей", [c["file"] for c in timings["chunks"]] == files)
-    ch.add("Аудио", "нет повторов частей",
-           len({hashlib.sha1((p.voice_dir / f).read_bytes()).hexdigest() for f in files}) == len(files))
+    silent = "none" in (p.data.get("result", {}).get("voice_providers") or [])
+    if not silent:  # при «без озвучки» части — тишина, одинаковые по содержимому
+        ch.add("Аудио", "нет повторов частей",
+               len({hashlib.sha1((p.voice_dir / f).read_bytes()).hexdigest() for f in files}) == len(files))
     master = p.voice_dir / "master_voice.wav"
     a, rate = A.read_wav(master)
     dur = len(a) / rate
     ch.add("Аудио", "master_voice.wav читается", dur > 5, f"{dur:.1f} с")
-    pause = A.longest_pause(a, rate)
-    ch.add("Аудио", "нет больших пауз", pause <= 2.5, f"макс. пауза {pause:.1f} с")
-    lufs = A.loudness(a, rate)
-    target = float(cfg.at("voice.target_lufs"))
-    ch.add("Аудио", f"громкость ≈ {target:.0f} LUFS", abs(lufs - target) <= 1.5, f"{lufs:.1f} LUFS", "warn")
+    if silent:  # выбрано «Нет — пропустить»: вместо голоса тишина расчётной длины, субтитры и таймкоды сохранены
+        ch.add("Аудио", "озвучка пропущена по выбору (тишина по темпу речи)", False, "", "warn")
+    else:
+        pause = A.longest_pause(a, rate)
+        ch.add("Аудио", "нет больших пауз", pause <= 2.5, f"макс. пауза {pause:.1f} с")
+        lufs = A.loudness(a, rate)
+        target = float(cfg.at("voice.target_lufs"))
+        ch.add("Аудио", f"громкость ≈ {target:.0f} LUFS", abs(lufs - target) <= 1.5, f"{lufs:.1f} LUFS", "warn")
     ch.add("Аудио", "голос заканчивается вместе с видео", abs(plan["duration_frames"] / fps - dur) < 0.2,
            f"видео {plan['duration_frames'] / fps:.1f} с / голос {dur:.1f} с")
 
@@ -131,7 +136,7 @@ def run(ctx) -> None:
             vd = probe_duration(out)
             ch.add("Экспорт", "локальное видео отрендерено", vd > 0 and abs(vd - dur) < 1.0, f"{vd:.1f} с")
             from PIL import Image, ImageStat
-            for label, t in (("начало", 1.0), ("середина", dur / 2), ("конец", max(0, dur - 1.5))):
+            for label, t in (("начало", min(1.0, dur / 4)), ("середина", dur / 2), ("конец", max(0, dur - 1.5))):
                 shot = grab_frame(out, t, p.export_dir / f"check_{label}.jpg")
                 mean = ImageStat.Stat(Image.open(shot).convert("L")).mean[0]
                 ch.add("Экспорт", f"кадр видео: {label}", mean > 12, f"яркость {mean:.0f}")
@@ -144,6 +149,13 @@ def run(ctx) -> None:
     # ---------- ОТЧЁТ ----------
     p.progress("verify", 5, 6, "Финальный отчёт")
     result = p.data.setdefault("result", {})
+    try:
+        from ..llm.gemini import llm
+        used = llm().router.used
+        if used:
+            result["text_providers"] = sorted(used, key=lambda k: -used[k])
+    except Exception:
+        pass
     result.update({
         "duration": round(dur, 1), "duration_text": f"{int(dur // 60)}:{int(dur % 60):02d}",
         "words": script["word_count"], "frames_done": len(frames) - len(bad), "frames_total": len(frames),
@@ -169,9 +181,12 @@ def _semantic(ctx, ch: Checks, frames: list[dict]) -> None:
     """Выборочная проверка смысла: до 10 кадров (начало/середина/конец) параллельно оценивает модель со зрением."""
     from ..core.parallel import parallel_map, workers
     from ..llm.gemini import llm
+    from ..core.storage import read_json as _rj
+    st = _rj(ctx.project.images_dir / "images_state.json", {}) or {}
     n = len(frames)
     idx = sorted({0, 1, 2, n // 4, n // 3, n // 2, 2 * n // 3, 3 * n // 4, n - 2, n - 1} & set(range(n)))
-    low = []
+    idx = [i for i in idx if st.get(frames[i]["frame_id"], {}).get("backend") != "none"]  # титульные карточки не проверяем
+    low, skipped = [], []
 
     def one(i):
         f = frames[i]
@@ -183,8 +198,16 @@ def _semantic(ctx, ch: Checks, frames: list[dict]) -> None:
             low.append(f"{f['frame_id']} ({r.get('score')}: {str(r.get('comment', ''))[:60]})")
 
     ctx.project.operation("Проверяю смысл кадров выборочно…")
-    parallel_map(one, idx, workers("llm", 4), on_result=got, check=ctx.check_stop,
-                 on_error=lambda i, e: ctx.log.warn(f"semantic check {frames[i]['frame_id']}: {e}", "verify"))
+    def err(i, e):
+        skipped.append(i)
+        ctx.log.warn(f"semantic check {frames[i]['frame_id']}: {e}", "verify")
+
+    if not idx:
+        return
+    parallel_map(one, idx, workers("llm", 4), on_result=got, check=ctx.check_stop, on_error=err)
+    if len(skipped) == len(idx):
+        ch.add("Кадры", "проверка смысла пропущена (нужна модель со зрением — Gemini)", False, "", "warn")
+        return
     ch.add("Кадры", "соответствуют смыслу (выборка)", not low, "; ".join(sorted(low)), "warn")
 
 
@@ -301,6 +324,15 @@ def stage_times(p) -> str:
     return "\n".join(rows)
 
 
+def _sources_line(r: dict) -> str:
+    from ..providers.catalog import CATALOG
+
+    def names(part, ids):
+        return ", ".join(CATALOG[part][i].label if i in CATALOG[part] else i for i in ids or []) or "—"
+    return "\n".join([f"  текст:   {names('text', r.get('text_providers'))}", f"  озвучка: {names('voice', r.get('voice_providers'))}",
+                      f"  кадры:   {names('images', r.get('image_providers'))}"])
+
+
 def build_report(p, r: dict, ch: Checks) -> str:
     line = "━" * 36
     ok = lambda b: "✓" if b else "✗"  # noqa: E731
@@ -315,6 +347,7 @@ def build_report(p, r: dict, ch: Checks) -> str:
         "Сценарий:", f"{r['words']} слов", "",
         "Кадры:", f"{r['frames_done']} / {r['frames_total']}", "",
         "Озвучка:", f"{r['voice_chunks']} частей", "",
+        "Источники:", _sources_line(r), "",
         "Монтаж:", ok(cc_ok) + (f"  {r.get('chatcut_url')}" if r.get("chatcut_url") else "  (ChatCut не использовался)"), "",
         "Субтитры:", ok(sub_ok), "",
         "Проверка:", f"{ok(not ch.errors)}  {r['checks_total'] - r['checks_failed']}/{r['checks_total']} проверок пройдено", "",

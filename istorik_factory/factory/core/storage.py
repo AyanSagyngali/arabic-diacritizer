@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -46,8 +47,8 @@ def write_text(path: Path, text: str, backup: bool = True, durable: bool = True)
                 os.fsync(f.fileno())
         with _lock:
             if backup and path.exists() and path.suffix == ".json":
-                try:
-                    os.replace(path, str(path) + ".bak")
+                try:  # копия, а не переименование: основной файл не исчезает ни на миг (иначе kill в этот момент «терял» проект)
+                    shutil.copyfile(path, str(path) + ".bak")
                 except OSError:
                     pass
             for attempt in range(5):  # Windows: файл может быть на мгновение занят антивирусом/индексатором

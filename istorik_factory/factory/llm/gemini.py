@@ -20,7 +20,7 @@ import httpx
 
 from ..config import config, gemini_keys, mock_mode
 from ..core import events
-from ..core.errors import (CANCEL, AllKeysExhausted, BadResponse, LLMError, LLMTimeout, ModelUnavailable, RegionBlocked,
+from ..core.errors import (NoValidKeys, CANCEL, AllKeysExhausted, BadResponse, LLMError, LLMTimeout, ModelUnavailable, RegionBlocked,
                            StopRequested, sleep)
 from ..core.storage import read_json, write_json
 from .cache import DiskCache
@@ -92,6 +92,8 @@ class Gemini:
         self.models = ModelResolver(self.data_dir / "models.json", fetch=self._list_models, overrides=cfg.at("llm.models") or {})
         self.cache = DiskCache(self.data_dir / "cache" / "llm")
         self._disabled: dict[str, set[str]] = {}
+        self._mcool: dict[tuple[str, str], float] = {}  # (ключ, модель) -> до какого времени 429
+        self._mlock = threading.Lock()
         self._local = threading.local()
         self._save_lock = threading.Lock()
 
@@ -242,17 +244,29 @@ class Gemini:
             raise ModelUnavailable(f"нет доступных моделей для задачи «{kind}»")
         errors: list[str] = []
         all_404 = True
+        q429 = 0
         for model in models:
-            transient = bad = 0
+            transient = bad = n429 = 0
             while True:
                 if CANCEL.is_set():
                     raise StopRequested()
                 remaining = end - time.time()
                 if remaining < 2:
                     raise LLMTimeout(f"Gemini не ответил за {int(deadline or self.call_deadline)} с: " + "; ".join(errors[-3:]))
+                now = time.time()
+                with self._mlock:
+                    excl = {v for (v, m), u in self._mcool.items() if m == model and u > now}
                 try:
-                    key = self.pool.acquire()
+                    key = self.pool.acquire(excl or None)
+                except NoValidKeys:
+                    if excl:  # у этой модели квота кончилась на всех ключах — берём следующую модель
+                        errors.append(f"{model}: квота исчерпана")
+                        break
+                    raise
                 except AllKeysExhausted as e:
+                    if excl:
+                        errors.append(f"{model}: квота исчерпана")
+                        break
                     wait = e.reset_at - time.time()
                     if wait < min(remaining - 5, 65):  # скорый сброс минутного лимита — дождаться
                         sleep(max(1.0, wait))
@@ -291,6 +305,11 @@ class Gemini:
                         continue
                     self.pool.ok(key, auth)
                     self._local.model = model
+                    try:
+                        from .usage import usage
+                        usage().record(key.value, model)
+                    except Exception:  # noqa: BLE001 — счётчик не должен ломать работу
+                        pass
                     return result
                 j, msg = self._error(r)
                 low = msg.lower()
@@ -298,7 +317,26 @@ class Gemini:
                     all_404 = False
                 if st == 429:
                     secs, daily = self._retry(j)
-                    self.pool.quota(key, secs, daily, "дневная квота" if daily else f"лимит, пауза {int(secs)} с")
+                    try:
+                        from .usage import usage
+                        usage().quota_hit(key.value, model, j)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    with self._mlock:
+                        until = time.time() + (secs if not daily else 6 * 3600)
+                        self._mcool[(key.value, model)] = until
+                        if daily:  # лимит общий на проект Google: все ключи того же проекта тоже исчерпаны для этой модели
+                            try:
+                                from .usage import same_project
+                                for other in same_project(key.value, [k.value for k in self.pool.keys()]):
+                                    self._mcool[(other, model)] = max(self._mcool.get((other, model), 0), until)
+                            except Exception:  # noqa: BLE001
+                                pass
+                    n429 += 1
+                    q429 += 1
+                    if n429 >= 3:  # квота обычно общая на проект — не мучаем все ключи, идём к следующей модели
+                        errors.append(f"{model}: квота (429) — {msg[:100]}")
+                        break
                     continue
                 if "location" in low and ("not supported" in low or "unsupported" in low):
                     raise RegionBlocked(msg)
@@ -325,6 +363,16 @@ class Gemini:
                 sleep(min(2.0 * transient, 4.0))
         if all_404:
             raise ModelUnavailable("; ".join(errors[-4:]))
+        if q429 and all("квота" in e for e in errors[-len(models):]):
+            now = time.time()
+            with self._mlock:
+                cool = {v: u for (v, m), u in self._mcool.items() if u > now}
+            keys = self.pool.keys()
+            e = AllKeysExhausted(min(cool.values()) if cool else now + 60, len(keys), len(cool),
+                                 sum(1 for k in keys if k.status == "invalid"))
+            e.args = (str(e) + ". Все модели Gemini отвечают 429 — ключи, скорее всего, из одного проекта Google "
+                      "(квота общая). Подождите сброса или добавьте ключи из других аккаунтов Google.",)
+            raise e
         raise LLMError("; ".join(errors[-4:]) or "не удалось получить ответ")
 
     # ---------- текст ----------
@@ -480,11 +528,13 @@ class Gemini:
 
 
 _client = None
+_paid = None
+_router = None
 _client_lock = threading.Lock()
 
 
-def llm():
-    """Общий клиент (в тестовом режиме FACTORY_MOCK=1 — офлайн-заглушка)."""
+def gemini():
+    """Клиент Gemini по бесплатным ключам (в тестовом режиме FACTORY_MOCK=1 — офлайн-заглушка)."""
     global _client
     with _client_lock:
         if _client is None:
@@ -496,7 +546,45 @@ def llm():
         return _client
 
 
-def reset_client() -> None:
-    global _client
+def gemini_paid():
+    """Клиент Gemini по ключам проектов с включённой оплатой (GEMINI_PAID_API_KEY) — отдельный пул и счётчики."""
+    global _paid
     with _client_lock:
-        _client = None
+        if _paid is None:
+            if mock_mode():
+                from .mock import MockGemini
+                _paid = MockGemini()
+            else:
+                import os
+                from ..config import parse_keys
+                d = config().path("data") / "paid"
+                d.mkdir(parents=True, exist_ok=True)
+                _paid = Gemini(keys=parse_keys(os.environ.get("GEMINI_PAID_API_KEY", "")), data_dir=d)
+        return _paid
+
+
+def llm():
+    """Текстовые вызовы по цепочке источников из «Источников» (Gemini → Groq → … → Ollama)."""
+    global _router
+    with _client_lock:
+        if _router is None:
+            from ..providers.text import TextRouter
+            _router = TextRouter()
+        return _router
+
+
+def reset_client() -> None:
+    global _client, _paid, _router
+    with _client_lock:
+        _client = _paid = None
+        if _router is not None:
+            _router.router.reset()
+        _router = None
+    try:
+        from ..providers import facts, images, limits, voice
+        voice.reset()
+        images.reset()
+        facts._cache = None   # кэши и счётчики привязаны к папке data — после смены настроек открываются заново
+        limits._l = None
+    except Exception:
+        pass

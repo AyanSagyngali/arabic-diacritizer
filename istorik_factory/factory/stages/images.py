@@ -1,7 +1,9 @@
 """ЭТАП 4 — ГЕНЕРАЦИЯ КАДРОВ: 001.png, 002.png, … строго по номерам.
 
-Gemini API — параллельно (turbo.image_workers), Google Flow — по одному (браузер). Каждый готовый кадр сразу
-сохраняется и отмечается в images_state.json; сбойный → NNN_FAILED, повтор сразу и в конце этапа.
+Источники — цепочка из «Источников» (например ComfyUI → Flow → Pollinations → Gemini → титульные карточки):
+если у источника кончился лимит или он упал, кадр делает следующий. Параллельно — если основной источник это
+позволяет (Gemini API), по одному — Flow/ComfyUI/Pollinations. Каждый готовый кадр сразу сохраняется;
+сбойный → NNN_FAILED, повтор сразу и в конце этапа.
 """
 from __future__ import annotations
 
@@ -10,59 +12,13 @@ import threading
 
 from ..config import mock_mode
 from ..core import events
-from ..core.errors import AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested
+from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested
 from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
-from ..media.images import inspect_bytes, placeholder, save_png, thumbnail, validate_file
+from ..media.images import inspect_bytes, save_png, thumbnail, validate_file
+from ..providers import images as providers
 
-FATAL = (AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested)
-
-
-class GeminiImageBackend:
-    name = "gemini_api"
-    parallel = True
-
-    def __init__(self, ctx):
-        from ..llm.gemini import llm
-        self.g = llm()
-        self.aspect = ctx.cfg.at("frames.aspect_ratio", "16:9")
-        self.negative = ctx.profile.get("visual_style", {}).get("negative", "")
-
-    def setup(self) -> None:
-        pass
-
-    def generate(self, frame: dict) -> bytes:
-        return self.g.image(frame["prompt"] + (f". Avoid: {self.negative}" if self.negative else ""), self.aspect)
-
-
-class MockBackend:
-    name = "mock"
-    parallel = True
-
-    def setup(self) -> None:
-        pass
-
-    def generate(self, frame: dict) -> bytes:
-        from ..llm.mock import _delay
-        _delay()
-        import tempfile
-        from pathlib import Path
-        tmp = Path(tempfile.mkdtemp()) / "x.png"
-        placeholder(f"{frame['frame_id']} {frame['text']}", tmp, seed=frame["number"])
-        return tmp.read_bytes()
-
-
-def make_backend(name: str, ctx):
-    if mock_mode():
-        return MockBackend()
-    if name == "flow":
-        from ..flow.generator import FlowBackend
-        b = FlowBackend(ctx)
-        b.parallel = False
-        return b
-    if name == "gemini_api":
-        return GeminiImageBackend(ctx)
-    raise ValueError(f"неизвестный генератор изображений: {name}")
+FATAL = (StopRequested, StageStalled, RegionBlocked)
 
 
 def run(ctx) -> None:
@@ -70,6 +26,8 @@ def run(ctx) -> None:
     cfg = ctx.cfg
     idir = p.images_dir
     frames = read_json(p.prompts_dir / "frames.json")["frames"]
+    script = read_json(p.script_dir / "script.json", {}) or {}
+    chapters = {c["number"]: c["title"] for c in script.get("chapters", [])}
     total = len(frames)
     state_path = idir / "images_state.json"
     state = read_json(state_path, {}) or {}
@@ -90,22 +48,8 @@ def run(ctx) -> None:
         if state.get(fid, {}).get("status") == "done":
             state[fid]["status"] = "pending"
     write_json(state_path, state)
-
-    primary = p.data.get("image_backend") or cfg.at("images.backend", "gemini_api")
-    fallback = cfg.at("images.fallback_backend") or None
-    holder = {"backend": make_backend(primary, ctx), "fails": 0}
-    try:
-        holder["backend"].setup()
-    except FATAL:
-        raise
-    except Exception as e:
-        if not fallback or fallback == primary:
-            raise
-        ctx.log.error(f"Image backend '{primary}' setup failed, switching to '{fallback}'", "flow", exc=e)
-        holder["backend"] = make_backend(fallback, ctx)
-        holder["backend"].setup()
-        p.update(image_backend=fallback)
     retries = int(cfg.at("images.retries_per_frame", 2))
+    ctx.log.log(f"Images: chain {' → '.join(providers.router().chain())}", "flow")
 
     def done_count() -> int:
         return sum(1 for f in frames if state.get(f["frame_id"], {}).get("status") == "done")
@@ -115,17 +59,17 @@ def run(ctx) -> None:
 
     def attempt(frame: dict) -> bool:
         fid = frame["frame_id"]
+        item = dict(frame, chapter_title=chapters.get(frame.get("chapter"), ""))
         for _ in range(retries + 1):
             ctx.check_stop()
-            backend = holder["backend"]
             with lock:
                 st = state.setdefault(fid, {"status": "pending", "attempts": 0})
                 st["attempts"] = st.get("attempts", 0) + 1
             try:
-                data = backend.generate(frame)
+                data, used = providers.generate(item, ctx)
                 ok, reason, im = inspect_bytes(data, min_w)
                 if not ok:
-                    raise ValueError(reason)
+                    raise ValueError(f"{used}: {reason}")
                 digest = hashlib.sha1(data).hexdigest()
                 with lock:
                     if digest in hashes and hashes[digest] != fid:
@@ -135,37 +79,33 @@ def run(ctx) -> None:
                 thumbnail(idir / f"{fid}.png")
                 (idir / f"{fid}_FAILED").unlink(missing_ok=True)
                 with lock:
-                    st.update(status="done", backend=backend.name, error=None, size=f"{im.width}x{im.height}")
+                    st.update(status="done", backend=used, error=None, size=f"{im.width}x{im.height}")
                     write_json(state_path, state)
-                    holder["fails"] = 0
-                ctx.log.log(f"Frame {fid} ✓ ({backend.name})", "flow")
+                ctx.log.log(f"Frame {fid} ✓ ({used})", "flow")
                 events.publish("frame", {"project": p.data["id"], "frame_id": fid})
-                report(f"Генерирую кадры: {done_count()}/{total} готово…")
+                report(f"Генерирую кадры: {done_count()}/{total} готово ({used})…")
                 return True
             except FATAL:
                 raise
+            except NoProviderLeft as e:
+                with lock:
+                    st.update(status="failed", error=str(e)[:300])
+                    write_json(state_path, state)
+                if e.reset_at:  # все источники в лимите — дальше пробовать бессмысленно
+                    raise
+                ctx.log.warn(f"Frame {fid} ERROR: {e}", "flow")
             except Exception as e:
                 with lock:
                     st.update(status="failed", error=f"{type(e).__name__}: {e}")
                     write_json(state_path, state)
-                    holder["fails"] += 1
-                    switch = holder["fails"] >= 6 and fallback and backend.name not in (fallback, "mock")
                 (idir / f"{fid}_FAILED").write_text(st["error"], encoding="utf-8")
                 ctx.log.warn(f"Frame {fid} ERROR: {e}", "flow")
-                if switch:
-                    with lock:
-                        if holder["backend"] is backend:
-                            ctx.log.warn(f"6 ошибок подряд в '{backend.name}' — переключаюсь на '{fallback}'", "flow")
-                            nb = make_backend(fallback, ctx)
-                            nb.setup()
-                            holder["backend"], holder["fails"] = nb, 0
-                            p.update(image_backend=fallback)
+        (idir / f"{fid}_FAILED").write_text(state[fid].get("error") or "ошибка", encoding="utf-8")
         return False
 
     def run_round(todo: list[dict]) -> None:
-        backend = holder["backend"]
-        n = workers("image", 6) if getattr(backend, "parallel", True) else 1
-        report(f"Генерирую кадры: {done_count()}/{total} готово ({n} потоков)…")
+        n = workers("image", 6) if providers.primary_parallel() else 1
+        report(f"Генерирую кадры: {done_count()}/{total} готово ({n} {'поток' if n == 1 else 'потоков'})…")
         parallel_map(attempt, todo, n, check=ctx.check_stop)
 
     run_round([f for f in frames if state.get(f["frame_id"], {}).get("status") != "done"])
@@ -184,4 +124,7 @@ def run(ctx) -> None:
         ok, reason = validate_file(idir / f"{f['frame_id']}.png", min_w)
         if not ok:
             raise RuntimeError(f"кадр {f['frame_id']}: {reason}")
-    ctx.log.log(f"Images generated: {total}/{total}", "flow")
+    used = sorted({state[f["frame_id"]].get("backend", "?") for f in frames})
+    p.data.setdefault("result", {})["image_providers"] = used
+    p.save()
+    ctx.log.log(f"Images generated: {total}/{total} ({', '.join(used)})", "flow")

@@ -10,3 +10,6 @@ pyloudnorm>=0.1.1
 playwright>=1.45
 imageio-ffmpeg>=0.5
 mcp>=1.12,<2
+python-multipart>=0.0.9
+soundfile>=0.12
+psutil>=5.9

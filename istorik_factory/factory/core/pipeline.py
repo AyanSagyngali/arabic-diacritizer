@@ -147,6 +147,11 @@ class Runner:
         resumed = any(p.stage(k)["status"] == "done" for k in STAGE_KEYS)
         p.update(status="running", user_action=None, last_error=None)
         p.log.log(f"Pipeline resumed from stage: {p.first_unfinished_stage()}" if resumed else "Pipeline started")
+        try:  # счётчик «кто сделал текст» — для отчёта этого запуска
+            from ..llm.gemini import llm
+            llm().router.used.clear()
+        except Exception:
+            pass
         ctx = Context(p, self)
         self.ctx = ctx
         wd_stop = threading.Event()

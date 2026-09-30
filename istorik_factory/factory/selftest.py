@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import ROOT, gemini_keys, mock_mode
+from .config import ROOT, mock_mode
 
 BUDGET = {"topics": 60, "research": 90, "script": 90, "prompts": 30, "images": 180, "voice": 60, "edit+verify": 300}
 
@@ -30,16 +30,25 @@ def selftest() -> int:
         _line(it["ok"], it["label"], it["detail"])
         bad += (it["ok"] is False and it["severity"] == "error")
 
-    if gemini_keys() and not mock_mode():
+    if not mock_mode():
+        from .config import config
+        from .core.errors import humanize
         from .llm.gemini import llm
-        t = time.time()
-        try:
-            out = llm().generate("Ответь одним словом: готов", tier="flash", thinking="off", cache=False, max_tokens=16, deadline=60)
-            _line(True, "Живой запрос к Gemini", f"{time.time() - t:.1f} с, модель {llm().last_model()}: «{out.strip()[:20]}»")
-        except Exception as e:
-            from .core.errors import humanize
-            h = humanize(e)
-            _line(False, "Живой запрос к Gemini", f"{h['title']}. {h['fix']}")
+        from .providers.catalog import CATALOG
+        chain = (config().at("providers.chains") or {}).get("text") or []
+        good = 0
+        for pid in chain:  # каждый источник текста из цепочки — живым запросом
+            name = CATALOG["text"][pid].label
+            t = time.time()
+            try:
+                out = llm().generate("Ответь одним словом: готов", tier="flash", thinking="off", cache=False, max_tokens=16,
+                                     deadline=60, only=pid)
+                _line(True, f"Текст: {name}", f"{time.time() - t:.1f} с, {llm().last_model()}: «{out.strip()[:20]}»")
+                good += 1
+            except Exception as e:
+                h = humanize(e)
+                _line(False, f"Текст: {name}", f"{h['title']}. {h['fix']}")
+        if chain and not good:
             bad += 1
 
     print("\nОфлайн-прогон конвейера (1 минута видео, без сети):")
@@ -60,16 +69,33 @@ def selftest() -> int:
     return 0 if not bad else 1
 
 
-def smoke(minutes: float = 1.0) -> int:
-    """Реальный прогон с вашими ключами: темы → 1-минутное видео. Время этапов — в REPORT.txt проекта."""
+SMOKE_MODES = {
+    # «всё без ключей»: локальные модели + бесплатные сервисы; в конце — титульные карточки, чтобы ролик собрался всегда
+    "keyless": {"text": ["ollama"], "voice": ["piper", "silero", "none"], "images": ["comfyui", "pollinations", "none"]},
+    # «Gemini + запасные»: ключи Google, при лимите — бесплатные API и локальные источники
+    "gemini": {"text": ["gemini", "groq", "openrouter", "ollama"], "voice": ["gemini", "piper", "silero"],
+               "images": ["gemini_api", "pollinations", "none"]},
+}
+
+
+def smoke(minutes: float = 1.0, mode: str | None = None) -> int:
+    """Реальный прогон: темы → 1-минутное видео. Время этапов и источники — в REPORT.txt проекта.
+    mode: None — как выбрано в «Источниках»; keyless — всё без ключей; gemini — Gemini + запасные."""
+    from .config import config
     from .core.pipeline import runner
     from .core.project import STAGES, Project
+    from .llm.gemini import reset_client
     from .topics import engine as topics
+    if mode:
+        chains = {p: list(ch) for p, ch in SMOKE_MODES[mode].items()}
+        config()["providers"]["chains"] = chains  # только на этот запуск, настройки панели не меняются
+        reset_client()
+        print(f"\nРежим: {mode} — " + " · ".join(f"{k}: {' → '.join(v)}" for k, v in chains.items()))
     timings: dict[str, float] = {}
     print("\nSmoke-тест: поиск тем…")
     t = time.time()
     try:
-        found = topics.refresh()
+        found = topics.refresh()[:6]
         timings["topics"] = time.time() - t
         title = found[0]["title"] if found else "Курултай 1206 года"
     except Exception as e:
@@ -82,7 +108,7 @@ def smoke(minutes: float = 1.0) -> int:
     for k, _ in STAGES:
         timings[k] = float(p.data["stages"][k].get("elapsed", 0) or 0)
     timings["edit+verify"] = timings.pop("edit", 0) + timings.pop("verify", 0) + timings.pop("materials", 0)
-    rows = ["", "SMOKE-ТЕСТ: время этапов (бюджет для 1-минутного видео)"]
+    rows = ["", f"SMOKE-ТЕСТ{f' ({mode})' if mode else ''}: время этапов (бюджет для 1-минутного видео)"]
     over = []
     for k, limit in BUDGET.items():
         v = timings.get(k, 0)

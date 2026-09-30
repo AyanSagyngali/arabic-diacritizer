@@ -112,8 +112,8 @@ def test_429_first_key_switches_immediately():
     t = time.time()
     assert g.generate("привет", cache=False) == "готово"
     assert time.time() - t < 1.0
-    k0 = next(k for k in g.pool.keys() if k.value == first["key"])
-    assert k0.status == "quota" and 30 < k0.until - time.time() < 45
+    until = max(u for (v, m), u in g._mcool.items() if v == first["key"])
+    assert 30 < until - time.time() < 45
 
 
 def test_daily_quota_cooldown_until_midnight():

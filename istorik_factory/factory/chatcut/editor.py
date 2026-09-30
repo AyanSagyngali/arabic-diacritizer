@@ -236,6 +236,10 @@ class TimelineBuilder:
             self.call("edit_track", {"action": "update", "trackId": tr["A1"], "json": '{"role":"anchor"}'})
             self.mark("voice")
 
+        # «без озвучки»: распознавать нечего — таймкоды берутся из расчёта, субтитры остаются в subtitles.srt
+        silent = "none" in (self.p.data.get("result", {}).get("voice_providers") or [])
+        if silent:
+            self.steps.update(transcribed=True, refined=True, captions=True)
         if not self.steps.get("transcribed"):
             self.wait_transcription(voice_id)
             self.mark("transcribed")

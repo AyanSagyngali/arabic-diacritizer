@@ -6,14 +6,14 @@ import threading
 
 import numpy as np
 
-from ..config import mock_mode
 from ..core import events
-from ..core.errors import AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested
+from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested
 from ..core.errors import sleep as err_sleep
 from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
 from ..core.text import speech_weight, words
 from ..media import audio as A
+from ..providers import voice as voice_providers
 
 
 def make_chunks(frames: list[dict], max_chars: int, min_chars: int) -> list[dict]:
@@ -50,7 +50,7 @@ def expected_seconds(text: str, wpm: float) -> float:
     return words(text) / (wpm / 60.0)
 
 
-def check_chunk(path, text: str, wpm: float) -> tuple[bool, str, float]:
+def check_chunk(path, text: str, wpm: float, allow_silent: bool = False) -> tuple[bool, str, float]:
     if not path.exists() or path.stat().st_size < 1000:
         return False, "файл отсутствует или пустой", 0.0
     try:
@@ -58,7 +58,7 @@ def check_chunk(path, text: str, wpm: float) -> tuple[bool, str, float]:
     except Exception as e:
         return False, f"не читается: {e}", 0.0
     d = len(a) / rate
-    if A.is_silent(a, rate):
+    if A.is_silent(a, rate) and not allow_silent:
         return False, "тишина", d
     exp = expected_seconds(text, wpm)
     if d < exp * 0.45:
@@ -80,21 +80,19 @@ def run(ctx) -> None:
     if not chunks:
         chunks = make_chunks(frames, int(vc["chunk_max_chars"]), int(vc["chunk_min_chars"]))
         write_json(vdir / "chunks.json", chunks)
-    ctx.log.log(f"Voice: {len(chunks)} chunks, speaker={vc['speaker']}, style={vc['style']}", "voice")
+    r = voice_providers.router()
+    ctx.log.log(f"Voice: {len(chunks)} chunks, chain {' → '.join(r.chain())}", "voice")
 
     state = read_json(vdir / "voice_state.json", {}) or {}
     lock = threading.Lock()
     direction = f"{vc['direction'].strip()} Стиль: {vc['style']}. Прочитай вслух следующий текст:"
-    tts = None
-    if not mock_mode():
-        from ..llm.gemini import llm
-        tts = llm()
 
     todo = []
     for c in chunks:  # уже готовые части (после перезапуска) проверяются, а не генерируются заново
-        ok, _, d = check_chunk(vdir / c["file"], c["text"], wpm)
+        prov = state.get(c["chunk_id"], {}).get("provider", "gemini")
+        ok, _, d = check_chunk(vdir / c["file"], c["text"], wpm, allow_silent=prov == "none")
         if ok:
-            state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3)}
+            state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3), "provider": prov}
         else:
             todo.append(c)
     write_json(vdir / "voice_state.json", state)
@@ -102,46 +100,65 @@ def run(ctx) -> None:
     def done_n() -> int:
         return sum(1 for c in chunks if state.get(c["chunk_id"], {}).get("status") == "done")
 
-    def one(c):
+    def one(c, only: str | None = None):
         path = vdir / c["file"]
         last = ""
         for attempt in range(int(vc.get("retries", 3)) + 1):
             try:
-                if mock_mode():
-                    from ..llm.mock import _delay
-                    _delay()
-                    rate = int(vc["sample_rate"])
-                    A.write_wav(path, A.synth_speech_like(expected_seconds(c["text"], wpm), rate, seed=int(c["chunk_id"])), rate)
-                else:
-                    pcm, rate = tts.tts(c["text"], vc["speaker"], direction)
-                    A.pcm_to_wav(pcm, path, rate)
-                ok, last, d = check_chunk(path, c["text"], wpm)
+                pcm, rate, used = voice_providers.tts(c["text"], vc["speaker"], direction, only=only)
+                A.pcm_to_wav(pcm, path, rate)
+                ok, last, d = check_chunk(path, c["text"], wpm, allow_silent=used == "none")
                 if ok:
-                    return d
-                ctx.log.warn(f"Voice chunk {c['chunk_id']} rejected: {last}", "voice")
-            except (StopRequested, AllKeysExhausted, NoValidKeys, RegionBlocked):
+                    return d, used
+                ctx.log.warn(f"Voice chunk {c['chunk_id']} rejected ({used}): {last}", "voice")
+            except (StopRequested, StageStalled, RegionBlocked):
                 raise
+            except NoProviderLeft as e:
+                last = str(e)
+                if e.reset_at:
+                    break
+                ctx.log.warn(f"Voice chunk {c['chunk_id']}: {last}", "voice")
             except Exception as e:
                 last = f"{type(e).__name__}: {e}"
                 ctx.log.warn(f"Voice chunk {c['chunk_id']} error: {last}", "voice")
                 err_sleep(min(8, 2 * (attempt + 1)))
-        with lock:
-            state[c["chunk_id"]] = {"status": "failed", "error": last}
-            write_json(vdir / "voice_state.json", state)
+        if only is None:  # при переозвучке прежняя готовая часть остаётся как есть
+            with lock:
+                state[c["chunk_id"]] = {"status": "failed", "error": last}
+                write_json(vdir / "voice_state.json", state)
         raise RuntimeError(f"часть озвучки {c['file']} не получена: {last}")
 
-    def saved(c, d):
+    def saved(c, res):
+        d, used = res
         with lock:
-            state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3)}
+            state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3), "provider": used}
             write_json(vdir / "voice_state.json", state)
             k = done_n()
-        ctx.log.log(f"Voice chunk {c['file']} ✓ {d:.1f}s", "voice")
+        ctx.log.log(f"Voice chunk {c['file']} ✓ {d:.1f}s ({used})", "voice")
         events.publish("voice", {"project": p.data["id"], "chunk": c["chunk_id"]})
-        p.progress("voice", k, len(chunks), f"Озвучиваю части: {k}/{len(chunks)} готово…")
+        p.progress("voice", k, len(chunks), f"Озвучиваю части: {k}/{len(chunks)} готово ({used})…")
 
     if todo:
         p.progress("voice", done_n(), len(chunks), f"Озвучиваю части: {done_n()}/{len(chunks)} готово…")
         parallel_map(one, todo, workers("voice", 4), on_result=saved, check=ctx.check_stop)
+
+    # один голос на весь ролик: если источник сменился посреди работы — переозвучить части другим голосом
+    used = {state[c["chunk_id"]].get("provider") or "gemini" for c in chunks}
+    if len(used) > 1 and str(ctx.cfg.at("providers.opts.voice_uniform", "1")) == "1":
+        ready = [pid for pid in r.chain() if not r.cooling(pid)]  # тот, кто сейчас доступен (не в лимите)
+        target = next((pid for pid in ready if pid in used), None) or (ready[0] if ready else sorted(used)[0])
+        redo = [c for c in chunks if state[c["chunk_id"]].get("provider") != target]
+        ctx.log.warn(f"Voice: mixed providers {sorted(used)} → re-voicing {len(redo)} chunks with '{target}' for one consistent voice", "voice")
+        p.progress("voice", len(chunks) - len(redo), len(chunks), f"Единый голос: переозвучиваю {len(redo)} частей ({target})…")
+        try:
+            parallel_map(lambda c: one(c, only=target), redo, workers("voice", 4), on_result=saved, check=ctx.check_stop)
+        except (StopRequested, StageStalled):
+            raise
+        except Exception as e:  # не удалось — оставляем смешанные голоса, но не теряем ролик
+            ctx.log.warn(f"Voice: could not unify voice ({e}); keeping mixed voices", "voice")
+    providers_used = sorted({state[c["chunk_id"]].get("provider") or "gemini" for c in chunks})
+    p.data.setdefault("result", {})["voice_providers"] = providers_used
+    p.save()
 
     p.progress("voice", len(chunks), len(chunks), "Склеиваю озвучку в master_voice.wav и выравниваю громкость…")
     merge(ctx, chunks, frames)
@@ -157,13 +174,16 @@ def merge(ctx, chunks: list[dict], frames: list[dict]) -> None:
     t = 0.0
     prev_chapter = None
     keep = int(vc["edge_silence_ms"])
+    vstate = read_json(vdir / "voice_state.json", {}) or {}
     for c in chunks:
         a, r = A.read_wav(vdir / c["file"])
         if rate is None:
             rate = r
-        if r != rate:
-            raise RuntimeError(f"{c['file']}: частота {r} ≠ {rate}")
-        a = A.trim(a, rate, keep_ms=keep)
+        if r != rate:  # части от разных источников озвучки — приводим к одной частоте
+            n = int(round(len(a) * rate / r))
+            a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a).astype(np.float32)
+        if vstate.get(c["chunk_id"], {}).get("provider") != "none":  # «без озвучки» — тишина расчётной длины, не обрезаем
+            a = A.trim(a, rate, keep_ms=keep)
         if len(a) == 0:
             raise RuntimeError(f"{c['file']}: после обрезки тишины ничего не осталось")
         if parts:

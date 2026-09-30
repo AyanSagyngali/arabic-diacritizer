@@ -70,9 +70,12 @@ def run_checks(deep_keys: bool = True) -> dict:
         if mock_mode():
             items.append(item("keys", "Ключи Gemini", True, "тестовый режим"))
         elif not keys:
-            items.append(item("keys", "Ключи Gemini", False, "не заданы", "keys", "Добавить ключи"))
+            from .settings import text_ready
+            other = text_ready(config())  # есть другой источник текста (Groq/OpenRouter/Ollama…) — не ошибка
+            items.append(item("keys", "Ключи Gemini", False, "не заданы" + (" — работают другие источники" if other else ""),
+                              "keys", "Добавить ключи", "warn" if other else "error"))
         else:
-            from .llm.gemini import llm
+            from .llm.gemini import gemini as llm
             s = llm().check_keys() if deep_keys else llm().pool.summary()
             good = s["ok"] + s["unknown"]
             items.append(item("keys", "Ключи Gemini", good > 0, s["text"], "keys" if s["invalid"] or not good else None,
@@ -90,7 +93,7 @@ def run_checks(deep_keys: bool = True) -> dict:
         if config().at("chatcut.enabled", True):
             items.append(item("chatcut", "Вход в ChatCut", bool(cc.get("tokens")), "выполнен" if cc.get("tokens") else "не выполнен",
                               None if cc.get("tokens") else "chatcut", "Войти", "warn"))
-        if (config().at("images.backend") == "flow"):
+        if "flow" in ((config().at("providers.chains") or {}).get("images") or [config().at("images.backend")]):
             flag = read_json(config().path("data") / "flow_login.json", {}) or {}
             items.append(item("flow", "Вход в Google Flow", bool(flag.get("ok")), "выполнен" if flag.get("ok") else "не выполнен",
                               None if flag.get("ok") else "flow", "Войти", "warn"))

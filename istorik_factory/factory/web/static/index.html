@@ -25,6 +25,7 @@
   </a>
   <div class="top-spacer"></div>
   <div class="top-actions">
+    <button class="btn btn-sm btn-ghost" id="sourcesBtn" type="button">Источники</button>
     <button class="badge pill-btn" id="keysPill" type="button" aria-label="Ключи Gemini">Ключи…</button>
     <button class="btn btn-sm" id="healthBtn" type="button" aria-label="Проверить систему">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
@@ -42,26 +43,28 @@
 
 <dialog id="dlgKeys" aria-labelledby="dlgKeysTitle">
   <form method="dialog" class="dlg-body" id="keysForm">
-    <h2 id="dlgKeysTitle">Ключи Google AI Studio</h2>
+    <h2 id="dlgKeysTitle">Ключи</h2>
+    <h3 class="dlg-sub">Google AI Studio (Gemini)</h3>
     <p class="muted">Вставьте один или сразу несколько ключей — через запятую, пробел или с новой строки. Программа сама отбросит лишний текст
       и будет использовать ключи по кругу: если у ключа кончилась квота, сразу берётся следующий. Ключи хранятся только у вас, в файле <code translate="no">.env</code>.</p>
     <div id="keysSummary" class="row"></div>
     <ul class="keys-list" id="keysList" aria-label="Список ключей"></ul>
+    <p class="hint" style="margin:0">В поле «проект» подпишите, из какого проекта Google ключ (например «Аккаунт 1 / A»). Ключи одного проекта делят один лимит —
+      когда у проекта кончилась дневная квота, программа сразу переходит к ключам другого проекта.</p>
     <div class="field">
       <label for="keysText">Новые ключи</label>
       <textarea id="keysText" name="keys" autocomplete="off" spellcheck="false" placeholder="AIza… или AQ.…, по одному в строке…"></textarea>
     </div>
     <label class="row" style="gap:8px"><input type="checkbox" id="keysReplace" name="replace"> Заменить все текущие ключи</label>
-    <div class="field">
-      <label for="ytKey">YouTube Data API key (необязательно)</label>
-      <input id="ytKey" name="youtube_key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…">
-    </div>
-  </form>
+    <h3 class="dlg-sub">Другие сервисы (необязательно)</h3>
+    <p class="hint" style="margin:0">Запасные источники на случай, когда кончились лимиты Gemini. Ключи хранятся только в файле <code translate="no">.env</code> на этом компьютере.</p>
+    <div class="extra-keys" id="extraKeys"></div>
+    </form>
   <div class="dlg-foot">
     <button class="btn btn-ghost" type="button" data-close>Закрыть</button>
     <button class="btn" type="button" id="keysRemoveBad">Удалить неверные</button>
     <button class="btn" type="button" id="keysCheck">Проверить ключи</button>
-    <button class="btn btn-primary" type="button" id="keysSave">Сохранить ключи</button>
+    <button class="btn btn-primary" type="button" id="keysSave">Сохранить</button>
   </div>
 </dialog>
 
@@ -79,12 +82,8 @@
           <option value="1">1 мин — тест</option><option value="3">3 мин</option><option value="5">5 мин</option><option value="8">8 мин</option>
           <option value="10">10 мин</option><option value="15">15 мин</option><option value="20">20 мин</option><option value="30">30 мин</option>
         </select></div>
-      <div class="field"><label for="startBackend">Кадры</label>
-        <select id="startBackend" name="backend">
-          <option value="gemini_api">Gemini API — быстро, параллельно</option>
-          <option value="flow">Google Flow — в браузере, по одному</option>
-        </select></div>
     </div>
+    <div class="start-chain"><span class="hint" id="startChain"></span> <button class="btn btn-ghost btn-sm" type="button" id="startSources">Изменить источники</button></div>
     <p class="hint" id="startEstimate"></p>
   </div>
   <div class="dlg-foot">

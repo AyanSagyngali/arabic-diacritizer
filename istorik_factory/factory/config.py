@@ -48,6 +48,8 @@ def load_config(path: Path | None = None) -> Config:
         _config = Config(yaml.safe_load(f))
     for key in ("projects", "data", "browser_profile"):
         _config.path(key).mkdir(parents=True, exist_ok=True)
+    from . import settings  # выбор источников из панели поверх config.yaml
+    settings.apply(_config)
     return _config
 
 
@@ -149,7 +151,10 @@ def save_gemini_keys(keys: list[str]) -> list[str]:
 def missing_secrets() -> list[str]:
     if mock_mode():
         return []
-    return [] if gemini_keys() else ["GEMINI_API_KEY"]
+    from . import settings
+    if settings.text_ready(config()):  # хватает любого источника текста: Gemini, Groq/OpenRouter/…, локальная Ollama
+        return []
+    return ["GEMINI_API_KEY"]
 
 
 def mock_mode() -> bool:

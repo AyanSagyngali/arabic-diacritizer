@@ -6,7 +6,9 @@
   python run.py --resume <id>        RESUME: продолжить проект с последнего завершённого этапа
   python run.py --list               список проектов
   python run.py --selftest           проверка системы за 1–2 минуты
-  python run.py --smoke              реальный тест на 1 минуту видео с вашими ключами + замер времени этапов
+  python run.py --smoke              реальный тест на 1 минуту видео + замер времени этапов (источники как в панели)
+  python run.py --smoke keyless      то же в режиме «всё без ключей» (Ollama, Piper/Silero, ComfyUI/Pollinations)
+  python run.py --smoke gemini       то же в режиме «Gemini + запасные»
 """
 from __future__ import annotations
 
@@ -129,7 +131,8 @@ def main() -> None:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--mock", action="store_true", help="офлайн-тест без сети и ключей")
     ap.add_argument("--selftest", action="store_true", help="проверка системы за 1–2 минуты")
-    ap.add_argument("--smoke", action="store_true", help="реальный тест: 1-минутное видео с замером времени")
+    ap.add_argument("--smoke", nargs="?", const="current", choices=["current", "keyless", "gemini"],
+                    help="реальный тест: 1-минутное видео с замером времени (keyless — всё без ключей, gemini — Gemini + запасные)")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
@@ -146,7 +149,7 @@ def main() -> None:
         sys.exit(selftest())
     if args.smoke:
         from factory.selftest import smoke
-        sys.exit(smoke(args.minutes or 1))
+        sys.exit(smoke(args.minutes or 1, None if args.smoke == "current" else args.smoke))
 
     if not args.mock:
         ask_keys()

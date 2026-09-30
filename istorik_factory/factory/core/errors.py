@@ -48,6 +48,28 @@ class NoValidKeys(LLMError):
         super().__init__(f"нет рабочих ключей Gemini (всего {total}): " + "; ".join(reasons[:3]))
 
 
+class ProviderUnavailable(LLMError):
+    """Источник не готов: не установлен, не запущен, нет ключа или нет сети."""
+
+
+class ProviderQuota(LLMError):
+    """У источника кончился лимит (есть время сброса)."""
+
+    def __init__(self, msg: str, reset_at: float | None = None):
+        super().__init__(msg)
+        self.reset_at = reset_at
+
+
+class NoProviderLeft(LLMError):
+    """Вся цепочка источников для части (текст/голос/кадры) не сработала."""
+
+    def __init__(self, part: str, errors: list[str], reset_at: float | None = None):
+        self.part, self.errors, self.reset_at = part, errors, reset_at
+        label = {"text": "текста", "voice": "озвучки", "images": "кадров"}.get(part, part)
+        tail = f"; ближайший сброс лимита ~{fmt_time(reset_at)}" if reset_at else ""
+        super().__init__(f"ни один источник {label} не сработал: " + " | ".join(errors[-5:]) + tail)
+
+
 def fmt_time(ts: float) -> str:
     return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
 
@@ -65,6 +87,15 @@ def humanize(exc: BaseException) -> dict:
     if isinstance(exc, AllKeysExhausted):
         return {"title": f"Квота Gemini исчерпана на всех ключах — сброс примерно в {fmt_time(exc.reset_at)}",
                 "fix": "Добавьте ещё ключи в панели («Ключи») или нажмите «Продолжить проект» после сброса квоты.",
+                "detail": text}
+    if isinstance(exc, NoProviderLeft):
+        when = f" Ближайший сброс лимита — примерно в {fmt_time(exc.reset_at)}." if exc.reset_at else ""
+        return {"title": f"Все источники {'текста' if exc.part == 'text' else 'озвучки' if exc.part == 'voice' else 'кадров'} "
+                         f"сейчас недоступны.{when}",
+                "fix": "Откройте «Источники» и добавьте запасной путь без лимита (Ollama, Piper/Silero, ComfyUI/Pollinations) "
+                       "или нажмите «Рекомендовать» — затем «Продолжить проект».", "detail": text}
+    if isinstance(exc, ProviderUnavailable):
+        return {"title": f"Источник не готов: {text[:160]}", "fix": "Откройте «Источники» и нажмите «Установить» или выберите другой.",
                 "detail": text}
     if isinstance(exc, NoValidKeys):
         return {"title": "Нет ни одного рабочего ключа Gemini",
