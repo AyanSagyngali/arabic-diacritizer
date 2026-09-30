@@ -203,6 +203,16 @@ SPECS = {
                 "fast": ["mistral-small-latest"]},
     "cerebras": {"base": "https://api.cerebras.ai/v1", "env": "CEREBRAS_API_KEY",
                  "prefer": ["gpt-oss-120b", "qwen-3-235b-a22b-instruct-2507", "llama-3.3-70b", "llama3.1-8b"]},
+    # OmniRoute — локальный шлюз к сотням ИИ (github.com/diegosouzapw/OmniRoute, MIT). Ключ шлюза не обязателен.
+    "omniroute": {"base": "http://localhost:20128/v1", "base_env": "OMNIROUTE_URL", "env": "OMNIROUTE_API_KEY",
+                  "keyless": True, "prefer": ["auto"], "stream": True},
+    "openai": {"base": "https://api.openai.com/v1", "env": "OPENAI_API_KEY",
+               "prefer": ["gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini"]},
+    "xai": {"base": "https://api.x.ai/v1", "env": "XAI_API_KEY", "prefer": ["grok-4-fast", "grok-3-mini", "grok-3"]},
+    "deepseek": {"base": "https://api.deepseek.com/v1", "env": "DEEPSEEK_API_KEY", "prefer": ["deepseek-chat"]},
+    # любой OpenAI-совместимый сервер (LM Studio, vLLM, llama.cpp, свой прокси): адрес — CUSTOM_LLM_URL
+    "custom": {"base": "", "base_env": "CUSTOM_LLM_URL", "env": "CUSTOM_LLM_KEY", "keyless": True, "prefer": [],
+               "model_env": "CUSTOM_LLM_MODEL", "stream": True},
 }
 
 
@@ -233,16 +243,37 @@ class OpenAICompat(TextBase):
         self._i = 0
         self._models_path = config().path("data") / f"models_{pid}.json"
 
+    @property
+    def base(self) -> str:
+        import os
+        env = self.spec.get("base_env")
+        v = (os.environ.get(env, "") if env else "").strip() or (config().at(f"providers.opts.{self.pid}_url") or "") \
+            or self.spec["base"]
+        v = v.rstrip("/")
+        return v if not v or v.endswith("/v1") or "/v1" in v else v + "/v1"
+
     def keys(self) -> list[str]:
-        return _secret_values(self.spec["env"])
+        k = _secret_values(self.spec["env"])
+        if not k and self.spec.get("keyless"):
+            import os
+            raw = os.environ.get(self.spec["env"], "").strip()
+            return [raw] if raw else [""]  # шлюзу ключ не обязателен
+        return k
+
+    def _auth(self, key: str) -> dict:
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def configured(self) -> bool:
-        return mock_mode() or bool(self.keys())
+        if mock_mode():
+            return True
+        if self.spec.get("keyless"):
+            return bool(self.base)
+        return bool(_secret_values(self.spec["env"]))
 
     def available(self):
         if mock_mode():
             return True, ""
-        if not self.keys():
+        if not self.configured():
             return False, f"нет ключа {self.spec['env']} (добавьте в окне «Ключи»)"
         return True, ""
 
@@ -261,7 +292,7 @@ class OpenAICompat(TextBase):
         if d.get("ids") and time.time() - d.get("at", 0) < 86400:
             return d["ids"]
         try:
-            r = self.http.get(self.spec["base"] + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=15)
+            r = self.http.get(self.base + "/models", headers=self._auth(key), timeout=15)
             r.raise_for_status()
             items = r.json().get("data", [])
         except (httpx.HTTPError, ValueError):
@@ -278,7 +309,9 @@ class OpenAICompat(TextBase):
         return ids
 
     def model_name(self, tier: str = "flash") -> str:
-        forced = config().at(f"providers.opts.{self.pid}_model") or ""
+        import os
+        forced = config().at(f"providers.opts.{self.pid}_model") or \
+            (os.environ.get(self.spec["model_env"], "").strip() if self.spec.get("model_env") else "")
         if forced:
             return forced
         keys = self.keys()
@@ -291,7 +324,7 @@ class OpenAICompat(TextBase):
         for mid in ids:
             if mid not in self._bad_models:
                 return mid
-        return next((p for p in prefer if p not in self._bad_models), prefer[0])
+        return next((p for p in prefer if p not in self._bad_models), prefer[0] if prefer else "default")
 
     def _record(self, r: httpx.Response, model: str) -> None:
         try:
@@ -313,11 +346,11 @@ class OpenAICompat(TextBase):
                                     "max_tokens": min(int(max_tokens), 8192)}
             if schema is not None:
                 body["response_format"] = {"type": "json_object"}
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            headers = {**self._auth(key), "Content-Type": "application/json"}
             if self.pid == "openrouter":
                 headers.update({"HTTP-Referer": "https://github.com/istorik-video-factory", "X-Title": "ISTORIK VIDEO FACTORY"})
             try:
-                r = self.http.post(self.spec["base"] + "/chat/completions", json=body, headers=headers,
+                r = self.http.post(self.base + "/chat/completions", json=body, headers=headers,
                                    timeout=httpx.Timeout(min(float(config().at("llm.request_timeout", 90)), remaining), connect=10))
             except httpx.TimeoutException:
                 last = "таймаут"
@@ -401,6 +434,9 @@ def make_text(pid: str):
         return MockText(pid)
     if pid in ("gemini", "gemini_paid"):
         return GeminiText(pid)
+    if pid == "omniroute":
+        from .omniroute import OmniRouteText
+        return OmniRouteText()
     if pid in SPECS:
         return OpenAICompat(pid)
     if pid == "ollama":

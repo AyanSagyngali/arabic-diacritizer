@@ -1,4 +1,5 @@
-"""Факты без Gemini: поиск по Википедии (официальный MediaWiki API, ru + en) и, по желанию, по своему SearXNG.
+"""Факты без Gemini: поиск по Википедии (официальный MediaWiki API, ru + en), встроенный поиск OmniRoute
+(DuckDuckGo, если OmniRoute запущен) и, по желанию, свой SearXNG.
 
 Используется, когда у выбранной текстовой модели нет поиска Google: исследование и темы опираются на найденные
 статьи (со ссылками), а не только на память модели. Результаты кэшируются на диске на 7 дней.
@@ -77,6 +78,14 @@ def collect(query: str, max_chars: int = 14000, deadline: float = 25) -> tuple[s
                 items += _wiki(http, lang, query, n, chars)
             except httpx.HTTPError:
                 continue
+        if str(config().at("providers.opts.omniroute_search") or "1") == "1" and time.time() - t0 < deadline:
+            try:  # встроенный поиск OmniRoute (DuckDuckGo и подключённые поисковики) — если OmniRoute запущен
+                from ..core.status import monitor
+                if (monitor().get("omniroute") or {}).get("running"):
+                    from .omniroute import search
+                    items += search(query, 5, timeout=min(15.0, max(3.0, deadline - (time.time() - t0))))
+            except Exception:  # noqa: BLE001
+                pass
         sx = config().at("providers.opts.searxng_url") or ""
         if sx and time.time() - t0 < deadline:
             try:

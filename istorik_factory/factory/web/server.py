@@ -27,11 +27,22 @@ from ..topics import engine as topics
 STATIC = Path(__file__).parent / "static"
 
 
+def _on_exit() -> None:
+    try:
+        from ..providers import omniroute
+        omniroute.stop_if_started()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _startup() -> None:
     """Проверка системы и автоматический поиск тем — в фоне, панель открывается мгновенно.
     Ключи Gemini при старте НЕ проверяются запросами (это тратило время и квоту) — только по кнопке «Проверить ключи»."""
+    import atexit
+
     from ..core.status import monitor
     monitor().start()
+    atexit.register(_on_exit)
 
     def bg():
         try:
@@ -96,7 +107,8 @@ def _usage() -> dict:
 
 
 EXTRA_SECRETS = ("GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "CEREBRAS_API_KEY", "HF_TOKEN", "POLLINATIONS_TOKEN",
-                 "GEMINI_PAID_API_KEY", "YOUTUBE_API_KEY")
+                 "GEMINI_PAID_API_KEY", "YOUTUBE_API_KEY", "OMNIROUTE_API_KEY", "OMNIROUTE_URL", "OPENAI_API_KEY", "XAI_API_KEY",
+                 "DEEPSEEK_API_KEY", "CUSTOM_LLM_URL", "CUSTOM_LLM_KEY", "CUSTOM_LLM_MODEL")
 
 
 class ProvidersIn(BaseModel):
@@ -137,6 +149,11 @@ def get_providers():
 
 def _providers_changed() -> dict:
     providers.reset_all()
+    try:
+        from ..core.status import monitor
+        monitor().refresh("omniroute") if monitor()._thread is None else monitor()._kick("omniroute")
+    except Exception:  # noqa: BLE001
+        pass
     snap = providers.snapshot()
     events.publish("providers", snap)
     return snap
@@ -176,7 +193,27 @@ def compute_recommendation(part: str | None = None) -> dict:
     opts = (config().get("providers") or {}).get("opts") or {}
     flow_ok = opts.get("flow_subscription") == "1" or bool(config().at("flow.subscription", False))
     return recommend(h, flow_ok=flow_ok, part=part, screen_ok=opts.get("screen_ack") == "1",
-                     installed=install.local_status())
+                     installed=install.status())
+
+
+@app.post("/api/providers/test/{pid}")
+def test_provider(pid: str):
+    """«Проверить»: короткий живой запрос к одному источнику текста (≤ 90 с) — ответ, время, модель или понятная ошибка."""
+    import time as _t
+
+    from ..llm.gemini import llm, reset_client
+    from ..providers.catalog import CATALOG
+    if pid not in CATALOG["text"]:
+        raise HTTPException(400, "неизвестный источник текста")
+    reset_client()
+    t0 = _t.time()
+    try:
+        out = llm().generate("Ответь по-русски одним коротким предложением: как называлась столица Золотой Орды?",
+                             tier="flash", thinking="off", cache=False, max_tokens=64, deadline=90, only=pid)
+        return {"ok": True, "text": out.strip()[:200], "seconds": round(_t.time() - t0, 1), "model": llm().last_model()}
+    except Exception as e:  # noqa: BLE001
+        h = humanize(e)
+        return {"ok": False, "error": h["title"], "fix": h["fix"], "detail": str(e)[:400], "seconds": round(_t.time() - t0, 1)}
 
 
 @app.get("/api/hw")
@@ -228,7 +265,8 @@ def save_extra_keys(body: ExtraKeysIn):
         if k not in EXTRA_SECRETS:
             raise HTTPException(400, f"неизвестный ключ {k}")
         v = (v or "").strip()
-        if v and (len(v) < 8 or not v.isascii() or any(ch.isspace() for ch in v)):
+        short_ok = k.endswith(("_URL", "_MODEL"))
+        if v and (len(v) < (2 if short_ok else 8) or not v.isascii() or any(ch.isspace() for ch in v)):
             raise HTTPException(400, f"{k}: ключ выглядит неправильно — вставьте его целиком, без пробелов")
         save_secret(k, v)
         os.environ[k] = v

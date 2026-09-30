@@ -389,3 +389,7 @@ dialog[open]::backdrop { opacity: 1; }
   .keys-list li .key-proj { grid-column: 2 / -1; grid-row: 2; }
 }
 @media (max-width: 480px) { #sourcesBtn { display: none; } }
+.omni { display: grid; gap: 8px; }
+.omni-help summary { cursor: pointer; font-size: 12.5px; color: var(--muted); touch-action: manipulation; }
+.omni-help ol { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.err-text { color: var(--err); }

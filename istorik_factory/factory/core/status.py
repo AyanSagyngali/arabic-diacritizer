@@ -25,6 +25,13 @@ def _ollama() -> dict:
     return ollama.probe(2.0)
 
 
+def _omniroute() -> dict:
+    if mock_mode():
+        return {"running": True, "installed": True, "url": "http://localhost:20128", "models": [], "auth_required": True}
+    from ..providers import omniroute
+    return omniroute.probe(2.0)
+
+
 def _install() -> dict:
     from ..providers import install
     return install.local_status()
@@ -32,7 +39,8 @@ def _install() -> dict:
 
 class Monitor:
     # имя → (функция, период обновления, с)
-    ITEMS: dict[str, tuple[Callable[[], Any], float]] = {"hw": (_hw, 600.0), "ollama": (_ollama, 10.0), "install": (_install, 20.0)}
+    ITEMS: dict[str, tuple[Callable[[], Any], float]] = {"hw": (_hw, 600.0), "ollama": (_ollama, 10.0), "install": (_install, 20.0),
+                                                        "omniroute": (_omniroute, 10.0)}
 
     def __init__(self):
         self._data: dict[str, Any] = {}

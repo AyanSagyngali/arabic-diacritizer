@@ -40,22 +40,27 @@ def recommend(hw: dict, flow_ok: bool = False, part: str | None = None, screen_o
     why, chains, opts = {}, {}, {}
 
     # ---- текст ----
-    api = [p for p in ("groq", "openrouter", "cerebras", "mistral") if _have_secret(CATALOG["text"][p].secret)]
+    api = [p for p in ("groq", "openrouter", "cerebras", "mistral", "xai", "deepseek", "openai")
+           if _have_secret(CATALOG["text"][p].secret)]
+    om_state = installed.get("omniroute") or {}
+    omni_up = bool(om_state.get("running"))
+    omni_note = ("OmniRoute запущен — бесплатные ИИ без ключей, сам переключается между провайдерами"
+                 if omni_up else "OmniRoute (если установить кнопкой) — бесплатные ИИ без ключей")
     if strong_gpu and om:
-        text = ["ollama"] + (["gemini"] if gkeys else []) + api
+        text = ["ollama"] + (["gemini"] if gkeys else []) + ["omniroute"] + api
         why["text"] = (f"Видеокарта {hw.get('gpu')} ({cuda_vram:g} ГБ) тянет {om} — текст локально без квот; "
-                       "Gemini и бесплатные API — запасные.")
+                       f"Gemini и {omni_note} — запасные.")
     else:
-        text = (["gemini"] if gkeys else []) + api + (["ollama"] if om else [])
-        why["text"] = ("Слабая видеокарта: основной — Gemini API (лучший русский и поиск Google), дальше бесплатные API"
-                       + (f", затем локальная Ollama ({om}) — медленнее, но без квот" if om else "")
+        text = (["gemini"] if gkeys else []) + ["omniroute"] + api + (["ollama"] if om else [])
+        why["text"] = ("Основной — Gemini API (лучший русский и поиск Google), пока есть квота; при 429 сразу "
+                       f"{omni_note}; дальше бесплатные API"
+                       + (f" и локальная Ollama ({om}) — на слабой видеокарте медленно, поэтому не единственный путь" if om else "")
                        + (", последним — Gemini в Chrome на экране." if screen_ok else "."))
     if _have_secret("GEMINI_PAID_API_KEY"):
         text.append("gemini_paid")
+    if _have_secret("CUSTOM_LLM_URL"):
+        text.append("custom")
     text.append("gemini_web")  # без согласия на экранный режим пропускается молча
-    if not [p for p in text if p != "gemini_web"]:
-        text = ["ollama", "gemini_web"] if om else ["gemini", "gemini_web"]
-        why["text"] = "Нет ключей: установите Ollama (без ключей) или добавьте ключ Gemini/Groq."
     chains["text"] = text
 
     # ---- голос ----

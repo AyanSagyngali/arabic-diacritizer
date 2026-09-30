@@ -35,6 +35,7 @@ HELP = """Команды (можно в любой момент):
   режим фон|экран|гибрид [текст|озвучка|кадры]   как работать: в фоне / через ваш браузер / гибрид
   flow да|нет          у меня есть подписка Google AI Pro (Flow)
   ключи                добавить ключи Gemini (необязательно)
+  omniroute            установить/запустить OmniRoute — бесплатные ИИ без ключей (пункт меню 7)
   экран согласен       включить экранный режим (Gemini и AI Studio в вашем Chrome) — прочитайте предупреждение
   debug                подробные ошибки в терминале (ещё раз — выключить)
   помощь               эта подсказка          выход        закрыть программу"""
@@ -194,6 +195,9 @@ class Terminal:
         if low in ("проверка", "проверка системы", "6", "check"):
             self.cmd_health()
             return True
+        if low in ("7", "omniroute", "подключить omniroute"):
+            self.cmd_omniroute()
+            return True
         if head in ("режим", "mode"):
             self.cmd_mode(arg)
             return True
@@ -272,7 +276,8 @@ class Terminal:
     # ---------- меню ----------
     def menu(self) -> None:
         self.out(f"\n{LINE}\n{'ISTORIK VIDEO FACTORY'.center(40)}\n{LINE}\n\n1. Актуальные темы\n2. Ввести свою тему\n"
-                 "3. Продолжить проект\n4. Список проектов\n5. Настройки\n6. Проверка системы\n0. Выход\n\nВыберите:")
+                 "3. Продолжить проект\n4. Список проектов\n5. Настройки\n6. Проверка системы\n7. Подключить OmniRoute (бесплатные ИИ без ключей)\n"
+                 "0. Выход\n\nВыберите:")
 
     def cmd_topics(self) -> None:
         from .topics import engine
@@ -446,6 +451,48 @@ class Terminal:
         from .llm.gemini import reset_client
         if not self.runner.busy:
             reset_client()
+
+    def cmd_omniroute(self) -> None:
+        """Установить (Node.js + npm), запустить и проверить OmniRoute — с прогрессом в терминале."""
+        from .providers import install
+        from .providers import omniroute as om
+        st = om.probe(2.0)
+        if not st["running"]:
+            self.out("Подключаю OmniRoute: " + ("запускаю…" if st.get("installed") else
+                                                 "ставлю Node.js (если нужно) и OmniRoute через npm — 2–5 минут…"))
+            install.install_async("omniroute")
+            t0, last = time.time(), ""
+            while install._state.get("omniroute", {}).get("running") and time.time() - t0 < 3600:
+                txt = install._state.get("omniroute", {}).get("text") or ""
+                if txt and txt != last:
+                    self.out(f"   {txt}")
+                    last = txt
+                time.sleep(0.5)
+            err = install._state.get("omniroute", {}).get("error")
+            if err:
+                self.out(f"✗ OmniRoute: {err}")
+                return
+        from .core.status import monitor
+        monitor().put("omniroute", om.probe(2.0))
+        self.out(f"OmniRoute запущен: {om.root_url()} (панель: {om.root_url()}{om.DASHBOARD}). Проверяю ответ…")
+        from .llm.gemini import llm, reset_client
+        reset_client()
+        t0 = time.time()
+        try:
+            out = llm().generate("Ответь по-русски одним коротким предложением: столица Золотой Орды?", tier="flash",
+                                 thinking="off", cache=False, max_tokens=64, deadline=90, only="omniroute")
+            self.out(f"✓ Ответ за {time.time() - t0:.1f} с ({llm().last_model()}): {out.strip()[:160]}")
+        except Exception as e:  # noqa: BLE001
+            h = humanize(e)
+            self.out(f"⚠ OmniRoute запущен, но ответа нет: {h['title']}\n  {h['fix']}\n  "
+                     "Добавьте свои аккаунты в панели OmniRoute → Providers (ChatGPT, Claude, Grok, Gemini, Groq…).")
+        from . import settings
+        s = settings.load(config())
+        if "omniroute" not in s["chains"]["text"]:
+            ch = s["chains"]["text"]
+            pos = ch.index("gemini") + 1 if "gemini" in ch else 0
+            settings.save(config(), {"chains": {"text": ch[:pos] + ["omniroute"] + ch[pos:]}})
+            self.out("OmniRoute добавлен в цепочку текста после Gemini.")
 
     def cmd_keys(self) -> None:
         from .config import gemini_keys, parse_keys, save_gemini_keys

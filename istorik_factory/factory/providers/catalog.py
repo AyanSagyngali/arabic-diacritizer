@@ -56,6 +56,12 @@ CATALOG: dict[str, dict[str, Info]] = {
                         "Ключ: console.mistral.ai (бесплатный план Experiment).", secret="MISTRAL_API_KEY", parallel=1),
         "cerebras": Info("cerebras", "text", "Cerebras (GPT-OSS 120B)", "key", "1 млн токенов/день, пробные кредиты",
                          "Ключ: cloud.cerebras.ai.", secret="CEREBRAS_API_KEY", parallel=2),
+        "omniroute": Info("omniroute", "text", "OmniRoute — шлюз к бесплатным ИИ", "free",
+                          "у каждого провайдера свой лимит; при сбое сам берёт другой",
+                          "Программа OmniRoute на этом компьютере (ставится кнопкой, нужен Node.js). Ключ не нужен: модель "
+                          "«auto» сама выбирает здоровый бесплатный провайдер. Свои аккаунты ChatGPT/Claude/Grok/Gemini/Groq "
+                          "добавляются в панели OmniRoute. Поиска Google нет — факты из его поиска и Википедии.",
+                          install="omniroute", parallel=2),
         "ollama": Info("ollama", "text", "Ollama — локальная модель", "local", "",
                        "Программа Ollama и модель 2–20 ГБ (берётся лучшая установленная). На 4 ГБ видеопамяти — qwen3:4b, "
                        "медленнее Gemini и проще по-русски. Поиска Google нет: факты — из Википедии.", install="ollama",
@@ -64,6 +70,14 @@ CATALOG: dict[str, dict[str, Info]] = {
                            "Ваш Chrome с входом в Google: программа пишет в gemini.google.com и забирает ответ. Медленно, "
                            "человеческим темпом; может нарушать правила Google — включается отдельно.", screen=True,
                            needs_ack=True, search=True, parallel=1),
+        "openai": Info("openai", "text", "OpenAI API", "paid", "по оплате", "Ключ platform.openai.com (платно).",
+                       secret="OPENAI_API_KEY", parallel=3),
+        "xai": Info("xai", "text", "xAI Grok API", "key", "по тарифу xAI", "Ключ console.x.ai.", secret="XAI_API_KEY", parallel=3),
+        "deepseek": Info("deepseek", "text", "DeepSeek API", "paid", "очень дёшево", "Ключ platform.deepseek.com (платно, дёшево).",
+                         secret="DEEPSEEK_API_KEY", parallel=3),
+        "custom": Info("custom", "text", "Свой OpenAI-совместимый сервер", "key", "как у вашего сервера",
+                       "Адрес CUSTOM_LLM_URL (LM Studio, vLLM, llama.cpp, прокси) и, если нужно, ключ CUSTOM_LLM_KEY и модель "
+                       "CUSTOM_LLM_MODEL — в окне «Ключи».", secret="CUSTOM_LLM_URL", parallel=2),
         "gemini_paid": Info("gemini_paid", "text", "Gemini с оплатой", "paid", "тысячи запросов в день",
                             "Ключ из проекта Google Cloud с включённой оплатой (Billing). Ролик ≈ 0,05–0,5 $.",
                             secret="GEMINI_PAID_API_KEY", search=True),
@@ -109,9 +123,11 @@ CATALOG: dict[str, dict[str, Info]] = {
 }
 
 # источники без ключа/установки пропускаются молча; экранные — только после согласия; «Нет» — только осознанно
-DEFAULT_CHAINS = {"text": ["gemini", "groq", "openrouter", "ollama", "gemini_web"], "voice": ["gemini", "aistudio", "piper"],
+DEFAULT_CHAINS = {"text": ["gemini", "omniroute", "ollama", "groq", "openrouter", "gemini_web"],
+                  "voice": ["gemini", "aistudio", "piper"],
                   "images": ["gemini_api", "pollinations"]}
 FLOW_CHAIN = ["flow", "gemini_api", "pollinations"]
+NEW_PROVIDERS = {"text": ["omniroute"]}  # добавляются в существующие цепочки один раз (кроме выбранных вручную)
 
 OLLAMA_MODELS = {  # "" — автоматически лучшая из установленных; дальше — лучшие для русского текста (Qwen3 — сильнее всех в неанглийских задачах; Gemma 3 — запасной)
     "": "Автоматически — лучшая установленная",

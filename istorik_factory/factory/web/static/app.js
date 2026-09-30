@@ -242,6 +242,15 @@ function provReady(part, it) {
   if (it.secret && !it.optional_secret && !P.secrets[it.secret]) {
     return { ok: false, text: "Нужен ключ", act: `<button class="btn btn-sm" type="button" data-keys="${esc(it.secret)}">Ввести ключ</button>` };
   }
+  if (it.id === "omniroute") {
+    const s = st.omniroute || {};
+    if (s.checking) return { ok: false, text: "проверяю OmniRoute…" };
+    if (!s.installed) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "Не установлен (нужен Node.js — поставится сам)", err: !!ins.error, act: installBtn("omniroute", "Установить и запустить") };
+    if (!s.running) return { ok: false, text: s.error ? `Не запущен: ${s.error}` : "Установлен, но не запущен", act: installBtn("omniroute", "Запустить") };
+    out.text = `запущен · модель ${s.model || "auto"}`;
+    if (route.active) out.active = true;
+    return out;
+  }
   if (it.install) {
     const s = st[it.install] || {};
     if (it.id === "ollama") {
@@ -258,6 +267,34 @@ function provReady(part, it) {
   }
   if (route.active) out.active = true;
   return out;
+}
+function omniBlock(P) {
+  const s = (P.status || {}).omniroute || {};
+  const cur = P.settings.opts.omniroute_model || "auto";
+  const models = (s.models && s.models.length ? s.models : ["auto"]);
+  const t = S.omniTest;
+  return `<div class="omni">
+    ${s.running ? `<select class="prov-opt" data-opt="omniroute_model" aria-label="Модель OmniRoute">${models.map((m) => `<option value="${esc(m)}" ${m === cur ? "selected" : ""}>${esc(m)}${m === "auto" ? " — сам выбирает бесплатный провайдер" : ""}</option>`).join("")}</select>` : ""}
+    <div class="row" style="gap:8px">
+      <button class="btn btn-sm" type="button" data-test="omniroute" ${s.running ? "" : "disabled"}>${t && t.running ? "Проверяю…" : "Проверить"}</button>
+      <a class="btn btn-sm btn-ghost" href="${esc(s.dashboard || "http://localhost:20128/dashboard")}" target="_blank" rel="noopener noreferrer">Панель OmniRoute ↗</a>
+    </div>
+    ${t && !t.running ? `<p class="hint ${t.ok ? "" : "err-text"}" style="margin:0">${t.ok ? `✓ ${esc(t.model || "")} за ${t.seconds} с: «${esc(t.text)}»` : `✗ ${esc(t.error)}${t.fix ? ` — ${esc(t.fix)}` : ""}`}</p>` : ""}
+    <details class="omni-help"><summary>Как добавить свои аккаунты (ChatGPT, Claude, Grok, Gemini…)</summary>
+      <ol class="hint">
+        <li>Откройте «Панель OmniRoute» (кнопка выше) → раздел <b>Providers</b>.</li>
+        <li>Выберите сервис: ChatGPT/Claude/Grok — вход через OAuth кнопкой; Gemini, Groq, OpenRouter, DeepSeek — вставьте API-ключ.</li>
+        <li>Модель «auto» сразу начнёт использовать новые аккаунты и переключаться между ними при лимитах.</li>
+        <li>Без аккаунтов работают встроенные бесплатные провайдеры OmniRoute (у каждого свой лимит).</li>
+        ${s.auth_required ? `<li>Полный список моделей OmniRoute отдаёт только с ключом шлюза: создайте его в <b>Endpoints</b> и вставьте в «Ключи» → OmniRoute.</li>` : ""}
+      </ol></details>
+  </div>`;
+}
+async function testProvider(pid, btn) {
+  S.omniTest = { running: true }; renderProviders();
+  try { S.omniTest = await post(`/api/providers/test/${pid}`); }
+  catch (e) { S.omniTest = { ok: false, error: e.message }; }
+  renderProviders();
 }
 function installBtn(name, label = "Установить") { return `<button class="btn btn-sm" type="button" data-install="${esc(name)}">${label}</button>`; }
 
@@ -284,6 +321,7 @@ function renderProviders() {
           ${r.pct != null ? `<div class="progress"><i style="transform:scaleX(${r.pct / 100})"></i></div>` : ""}`
         : r.ok ? `<div class="prov-state"><span class="badge ${r.active ? "gold" : "ok"}"><span class="dot"></span>${r.active ? "сейчас работает" : "готово"}</span>${r.text ? `<span class="hint">${esc(r.text)}</span>` : ""}</div>`
           : `<div class="prov-state"><span class="badge ${r.cool ? "warn" : r.err ? "err" : ""}"><span class="dot"></span>${r.cool ? "в лимите" : r.err ? "ошибка" : "не готово"}</span><span class="hint clamp-2" title="${esc(r.text)}">${esc(r.text)}</span>${r.act || ""}</div>`;
+      const omni = id === "omniroute" ? omniBlock(P) : "";
       return `<li class="prov-item${i === 0 ? " primary" : ""}" data-part="${part}" data-id="${esc(id)}">
         <div class="prov-head"><span class="prov-n num" aria-hidden="true">${i + 1}</span>
           <div class="prov-name"><b>${esc(it.label)}</b><span class="badge prov-badge ${BADGE_CLS[it.badge] || ""}">${esc(it.badge_text)}</span></div>
@@ -292,7 +330,7 @@ function renderProviders() {
             <button class="btn btn-ghost btn-sm btn-icon" type="button" data-move="1" ${i === chain.length - 1 ? "disabled" : ""} aria-label="Ниже: ${esc(it.label)}">↓</button>
             <button class="btn btn-ghost btn-sm btn-icon" type="button" data-remove ${chain.length === 1 ? "disabled" : ""} aria-label="Убрать: ${esc(it.label)}">×</button>
           </div></div>
-        <p class="hint prov-needs">${esc(it.needs)}</p>${optSel}${state}</li>`;
+        <p class="hint prov-needs">${esc(it.needs)}</p>${optSel}${state}${omni}</li>`;
     }).join("");
     return `<section class="prov-part" aria-labelledby="pp-${part}">
       <div class="section-h"><h3 id="pp-${part}" class="grow">${title}<span class="subtle">${sub}</span></h3>${modeSel(part)}
@@ -323,6 +361,7 @@ function renderProviders() {
   }));
   $$("[data-keys]", box).forEach((b) => b.addEventListener("click", () => openKeys(b.dataset.keys)));
   $$("[data-rec]", box).forEach((b) => b.addEventListener("click", () => recommendProv(b.dataset.rec, b)));
+  $$("[data-test]", box).forEach((b) => b.addEventListener("click", () => testProvider(b.dataset.test, b)));
   $$("[data-sample]", box).forEach((inp) => inp.addEventListener("change", () => uploadSample(inp)));
 }
 function moveProv(li, dir) {
@@ -852,6 +891,14 @@ const EXTRA_KEYS = [
   ["OPENROUTER_API_KEY", "OpenRouter", "бесплатные модели: 50 запросов/день (1 000 после пополнения на $10)", "https://openrouter.ai/keys"],
   ["MISTRAL_API_KEY", "Mistral", "бесплатный тариф Experiment", "https://console.mistral.ai/api-keys"],
   ["CEREBRAS_API_KEY", "Cerebras", "бесплатный пробный тариф", "https://cloud.cerebras.ai"],
+  ["OMNIROUTE_API_KEY", "OmniRoute — ключ шлюза", "необязательно: нужен, только если в OmniRoute включена защита ключом или для полного списка моделей", "http://localhost:20128/dashboard"],
+  ["OMNIROUTE_URL", "OmniRoute — адрес", "необязательно: если OmniRoute не на http://localhost:20128", "http://localhost:20128/dashboard"],
+  ["CUSTOM_LLM_URL", "Свой OpenAI-совместимый сервер — адрес", "LM Studio, vLLM, llama.cpp, прокси: например http://localhost:1234/v1", "https://lmstudio.ai"],
+  ["CUSTOM_LLM_KEY", "Свой сервер — ключ", "если сервер требует ключ", "https://lmstudio.ai"],
+  ["CUSTOM_LLM_MODEL", "Свой сервер — модель", "имя модели на вашем сервере", "https://lmstudio.ai"],
+  ["DEEPSEEK_API_KEY", "DeepSeek", "платно, очень дёшево", "https://platform.deepseek.com/api_keys"],
+  ["XAI_API_KEY", "xAI Grok", "по тарифу xAI", "https://console.x.ai"],
+  ["OPENAI_API_KEY", "OpenAI", "платно", "https://platform.openai.com/api-keys"],
   ["GEMINI_PAID_API_KEY", "Gemini с оплатой", "ключ проекта с включённым биллингом — без дневных лимитов, платно", "https://aistudio.google.com/apikey"],
   ["HF_TOKEN", "Hugging Face", "кадры FLUX через бесплатные кредиты", "https://huggingface.co/settings/tokens"],
   ["POLLINATIONS_TOKEN", "Pollinations", "необязательно: ускоряет бесплатные кадры", "https://auth.pollinations.ai"],
@@ -869,7 +916,7 @@ function renderKeysList() {
   const sec = S.providers?.secrets || {};
   $("#extraKeys").innerHTML = EXTRA_KEYS.map(([id, name, what, url]) => `<div class="field extra-key">
     <label for="xk-${id}">${esc(name)} ${sec[id] ? `<span class="badge ok">сохранён</span>` : ""}</label>
-    <input id="xk-${id}" data-secret="${id}" type="password" autocomplete="off" spellcheck="false" placeholder="${sec[id] ? "•••••••• (оставьте пустым, чтобы не менять)" : "вставьте ключ…"}">
+    <input id="xk-${id}" data-secret="${id}" type="${/_(URL|MODEL)$/.test(id) ? "text" : "password"}" autocomplete="off" spellcheck="false" placeholder="${sec[id] ? "•••••••• (оставьте пустым, чтобы не менять)" : "вставьте ключ…"}">
     <span class="hint">${esc(what)} · <a href="${url}" target="_blank" rel="noopener noreferrer">где взять</a>${sec[id] ? ` · <button class="linkbtn" type="button" data-clear="${id}">удалить</button>` : ""}</span></div>`).join("");
   $$("[data-clear]").forEach((b) => b.addEventListener("click", async () => {
     try { const r = await post("/api/keys/extra", { values: { [b.dataset.clear]: "" } }); S.providers.secrets = r.secrets; renderKeysList(); renderProviders(); toast("Ключ удалён", "success"); } catch (e) { fail(e); }

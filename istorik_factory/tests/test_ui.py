@@ -305,6 +305,48 @@ def test_sources_and_limits_states(server, browser, width):
     settings.save(server["cfg"], {"chains": dict(DEFAULT_CHAINS), "opts": {"flow_subscription": "", "mode_text": "hybrid"}})
 
 
+@pytest.mark.parametrize("width", [1440, 390])
+def test_omniroute_block_states(server, browser, width, monkeypatch):
+    """OmniRoute в «Источниках»: не установлен → установлен, не запущен → запущен (модели, «Проверить», панель, подсказка)."""
+    from factory.core import events
+    from factory.core.status import monitor
+    from factory.providers import install, snapshot
+    monkeypatch.setattr(install, "_om_exe", lambda: None)  # на машине тестов OmniRoute может быть установлен
+    m = monitor()
+    m.refresh("install")
+    pg, errors = page(browser, width)
+    pg.goto(server["url"])
+    item = '.prov-item[data-part="text"][data-id="omniroute"]'
+    pg.wait_for_selector(item)
+    try:
+        m.put("omniroute", {"running": False, "installed": False, "models": [], "error": ""})
+        events.publish("providers", snapshot())
+        pg.wait_for_selector(f"{item} >> text=Установить и запустить")
+        m.put("omniroute", {"running": False, "installed": True, "models": [], "error": "порт 20128 занят другой программой"})
+        events.publish("providers", snapshot())
+        pg.wait_for_selector(f"{item} >> text=порт 20128 занят")
+        assert pg.locator(f'{item} [data-test="omniroute"]').is_disabled()
+        m.put("omniroute", {"running": True, "installed": True, "models": ["auto", "auto/fast", "groq/llama-3.3-70b"],
+                            "auth_required": True})
+        events.publish("providers", snapshot())
+        pg.wait_for_selector(f"{item} >> text=запущен · модель")
+        assert pg.locator(f'{item} select[data-opt="omniroute_model"] option').count() >= 3
+        assert pg.locator(f'{item} a:has-text("Панель OmniRoute")').get_attribute("href").startswith("http://localhost:20128")
+        pg.locator(f"{item} .omni-help summary").click()
+        pg.wait_for_selector(f"{item} >> text=Endpoints")
+        pg.locator(f'{item} [data-test="omniroute"]').click()
+        pg.wait_for_selector(f"{item} .omni p.hint", timeout=120000)
+        pg.locator(item).scroll_into_view_if_needed()
+        shot(pg, "13_omniroute", width)
+        assert no_hscroll(pg), wide_elements(pg)
+        assert not errors, errors
+    finally:
+        monkeypatch.undo()
+        m.refresh("install")
+        m.refresh("omniroute")
+        events.publish("providers", snapshot())
+
+
 def test_guidelines_static_audit():
     """Статическая проверка по правилам Vercel Web Interface Guidelines и Эмиля Ковальски."""
     css = (STATIC / "app.css").read_text(encoding="utf-8")

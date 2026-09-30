@@ -88,6 +88,11 @@ def start_comfyui() -> bool:
 
 
 # ---------- статус ----------
+def _om_exe():
+    from .omniroute import exe
+    return exe()
+
+
 def local_status() -> dict:
     """Что установлено — только локальные проверки файлов и пакетов (быстро, без сети). Для монитора состояния."""
     pv = config().at("providers.opts.piper_voice") or "ru_RU-denis-medium"
@@ -100,6 +105,7 @@ def local_status() -> dict:
         "silero": {"installed": has("torch"), "long_paths": long_paths_enabled()},
         "chatterbox": {"installed": has("chatterbox"), "sample": (config().path("data") / "voice_sample.wav").exists()},
         "ollama_exe": bool(ollama_exe()),
+        "omniroute_exe": bool(_om_exe()),
         "comfyui": {"installed": bool(comfy_main()) and bool(ck and (ck / COMFY_FILES.get(kind, COMFY_FILES["sdxl"])["file"]).exists()),
                     "program": bool(comfy_main())},
     }
@@ -134,6 +140,12 @@ def status() -> dict:
     loc["ollama"] = {"installed": bool(loc.get("ollama_exe")) or bool(ol.get("running")), "running": bool(ol.get("running")),
                      "models": [m["name"] for m in ol.get("models", [])], "has_model": bool(model), "model": model,
                      "note": why, "checking": not ol}
+    om = monitor().get("omniroute") or {}
+    from .omniroute import DASHBOARD, model_choices, root_url
+    loc["omniroute"] = {"installed": bool(om.get("installed") or loc.get("omniroute_exe") or om.get("running")),
+                        "running": bool(om.get("running")), "models": model_choices(om), "auth_required": bool(om.get("auth_required")),
+                        "dashboard": root_url() + DASHBOARD, "error": om.get("error"), "checking": not om,
+                        "model": config().at("providers.opts.omniroute_model") or "auto"}
     loc["install"] = {k: dict(v) for k, v in _state.items()}
     return loc
 
@@ -333,8 +345,74 @@ def _comfyui(name: str) -> None:
     start_comfyui()
 
 
+NODE_OK = ((22, 22, 2), (23, 0, 0)), ((24, 0, 0), (27, 0, 0))  # версии Node.js, которые поддерживает OmniRoute
+
+
+def node_exe() -> str | None:
+    found = shutil.which("node")
+    if found:
+        return found
+    for p in (Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe",
+              Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "nodejs" / "node.exe"):
+        if str(p) and p.exists():
+            return str(p)
+    return None
+
+
+def node_version(exe: str | None = None) -> tuple[int, int, int] | None:
+    exe = exe or node_exe()
+    if not exe:
+        return None
+    try:
+        v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15, creationflags=NOWIN).stdout.strip()
+        return tuple(int(x) for x in v.lstrip("v").split(".")[:3])  # type: ignore[return-value]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def node_ok(v) -> bool:
+    return bool(v) and any(lo <= tuple(v) < hi for lo, hi in NODE_OK)
+
+
+def _omniroute(name: str) -> None:
+    """Node.js (winget, если нет подходящего) → npm i -g omniroute → запуск в фоне → проверка /api/health."""
+    from . import omniroute as om
+    if not om.exe():
+        node = node_exe()
+        ver = node_version(node)
+        if not node_ok(ver):
+            if not sys.platform.startswith("win"):
+                raise RuntimeError(f"Нужен Node.js 22.22+ или 24+ (сейчас: {'.'.join(map(str, ver)) if ver else 'нет'}). "
+                                   "Установите с nodejs.org и нажмите «Установить» ещё раз.")
+            if not shutil.which("winget"):
+                raise RuntimeError("Нужен Node.js 24 LTS: скачайте с nodejs.org (кнопка LTS), установите и нажмите «Установить» ещё раз.")
+            _set(name, text="Устанавливаю Node.js LTS (winget, 2–5 минут)…", pct=None)
+            r = subprocess.run(["winget", "install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements",
+                                "--accept-source-agreements", "--silent"], capture_output=True, text=True, creationflags=NOWIN,
+                               timeout=1800)
+            node = node_exe()
+            ver = node_version(node)
+            if not node_ok(ver):
+                raise RuntimeError("Node.js не установился через winget (" + (r.stdout or r.stderr or "")[-200:].strip() +
+                                   "). Скачайте Node.js LTS с nodejs.org, установите и нажмите «Установить» ещё раз.")
+        npm = str(Path(node).with_name("npm.cmd" if sys.platform.startswith("win") else "npm")) if node else "npm"
+        if not Path(npm).exists():
+            npm = shutil.which("npm") or npm
+        _set(name, text="Устанавливаю OmniRoute (npm, ≈500 МБ, 2–5 минут)…", pct=None)
+        r = subprocess.run([npm, "i", "-g", "omniroute", "--no-fund", "--no-audit"], capture_output=True, text=True,
+                           creationflags=NOWIN, timeout=3600)
+        if r.returncode != 0 or not om.exe():
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-4:]
+            raise RuntimeError("npm не смог установить OmniRoute: " + " | ".join(tail)[-400:])
+    _set(name, text="Запускаю OmniRoute…", pct=None)
+    ok, msg = om.start(120.0)
+    if not ok:
+        raise RuntimeError(f"OmniRoute установлен, но не запустился: {msg}")
+
+
 INSTALLERS = {"edge": lambda n: _pip(["edge-tts"], n, "Устанавливаю edge-tts…"), "piper": _piper, "silero": _silero,
-              "chatterbox": _chatterbox, "ollama": _ollama, "comfyui": _comfyui}
+              "chatterbox": _chatterbox, "ollama": _ollama, "comfyui": _comfyui,
+              "omniroute": _omniroute}
 
 
 def human_error(e: BaseException) -> str:

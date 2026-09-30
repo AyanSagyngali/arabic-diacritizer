@@ -137,6 +137,16 @@ def humanize(exc: BaseException) -> dict:
                          f"сейчас недоступны.{when}",
                 "fix": "Откройте «Источники» и добавьте запасной путь без лимита (Ollama, Piper/Silero, ComfyUI/Pollinations) "
                        "или нажмите «Рекомендовать» — затем «Продолжить проект».", "detail": text}
+    if isinstance(exc, AuthenticationError):
+        return {"title": f"Ключ или вход не принят: {text[:200]}", "fix": "Проверьте ключ в окне «Ключи» — работа идёт через другие "
+                "источники.", "detail": text}
+    if isinstance(exc, ProviderQuota):
+        when = f" (до ~{fmt_time(exc.reset_at)})" if getattr(exc, "reset_at", None) else ""
+        return {"title": f"Лимит источника{when}: {text[:200]}", "fix": "Работа продолжается через следующий источник цепочки; "
+                "если их нет — добавьте OmniRoute/Ollama в «Источниках» или продолжите позже.", "detail": text}
+    if isinstance(exc, TemporaryError):
+        return {"title": f"Временный сбой: {text[:200]}", "fix": "Повторите — или работа пойдёт через следующий источник.",
+                "detail": text}
     if isinstance(exc, ProviderUnavailable):
         return {"title": f"Источник не готов: {text[:160]}", "fix": "Откройте «Источники» и нажмите «Установить» или выберите другой.",
                 "detail": text}
