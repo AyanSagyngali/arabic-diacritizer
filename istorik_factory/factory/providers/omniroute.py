@@ -181,6 +181,133 @@ def _node_env() -> dict:
     return env
 
 
+# ---------- автонастройка (разрешено пользователем): ключ шлюза и ваши ключи внутри OmniRoute ----------
+# Всё локально на вашем компьютере: ключ шлюза сохраняется в .env (OMNIROUTE_API_KEY), ваши ключи передаются OmniRoute
+# через переменную окружения процесса (не в командной строке) и хранятся у него зашифрованными. В git ничего не попадает.
+USER_KEYS = {"GROQ_API_KEY": "groq", "OPENROUTER_API_KEY": "openrouter", "MISTRAL_API_KEY": "mistral",
+             "CEREBRAS_API_KEY": "cerebras", "XAI_API_KEY": "xai", "DEEPSEEK_API_KEY": "deepseek", "OPENAI_API_KEY": "openai"}
+KEY_NAME = "ISTORIK VIDEO FACTORY"
+
+
+def pkg_root() -> Path | None:
+    cands: list[Path] = []
+    e = exe()
+    if e:
+        p = Path(e).resolve()
+        cands += [p.parent.parent, p.parent / "node_modules" / "omniroute", p.parent.parent / "lib" / "node_modules" / "omniroute"]
+    cands.append(Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "omniroute")
+    return next((c for c in cands if (c / "bin" / "cli" / "api.mjs").exists()), None)
+
+
+def admin(path: str, method: str = "GET", body: dict | None = None, timeout: float = 60.0) -> tuple[int, Any]:
+    """Служебный API OmniRoute на этом компьютере (как команда `omniroute`). → (HTTP-статус, JSON или текст)."""
+    from .install import node_exe
+    root, node = pkg_root(), node_exe()
+    if not root or not node:
+        return 0, "OmniRoute или Node.js не найдены"
+    args = [node, str(Path(__file__).with_name("omniroute_admin.mjs")), str(root), path, method]
+    if body is not None:
+        args.append(json.dumps(body, ensure_ascii=False))
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                           env=dict(_node_env(), OMNIROUTE_BASE_URL=root_url(), NO_COLOR="1"), creationflags=NOWIN)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return 0, str(ex)
+    line = next((x for x in reversed(r.stdout.splitlines()) if x[:1].isdigit()), "0 " + (r.stderr or "")[-300:])
+    code, _, text = line.partition(" ")
+    try:
+        return int(code), json.loads(text)
+    except ValueError:
+        return int(code) if code.isdigit() else 0, text
+
+
+def ensure_gateway_key() -> str:
+    """Ключ шлюза OmniRoute: создаётся один раз и сохраняется в .env как OMNIROUTE_API_KEY."""
+    from ..config import save_secret
+    if api_key():
+        return api_key()
+    code, data = admin("/api/keys", "POST", {"name": KEY_NAME})
+    key = data.get("key") if isinstance(data, dict) else None
+    if code in (200, 201) and isinstance(key, str) and key.startswith("sk-"):
+        save_secret("OMNIROUTE_API_KEY", key)
+        return key
+    raise RuntimeError(f"OmniRoute не выдал ключ (HTTP {code}) — создайте его в панели OmniRoute → Endpoints и вставьте в «Ключи»")
+
+
+def _tag(key: str) -> str:
+    import hashlib
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+def wanted_connections() -> list[tuple[str, str, str]]:
+    """Ваши ключи из .env для OmniRoute: [(провайдер, имя подключения, ключ)]."""
+    from ..config import gemini_keys
+    out = [("gemini", f"istorik-gemini-{_tag(k)}", k) for k in gemini_keys()]
+    for env, prov in USER_KEYS.items():
+        k = os.environ.get(env, "").strip()
+        if len(k) >= 10:
+            out.append((prov, f"istorik-{prov}-{_tag(k)}", k))
+    return out
+
+
+def sync_user_keys() -> dict:
+    """Добавить ваши ключи (Gemini, Groq, OpenRouter…) в OmniRoute: модель auto будет чередовать их с бесплатными.
+    Уже добавленные не дублируются. → {"added": [...], "failed": [...]}"""
+    res: dict[str, list] = {"added": [], "failed": []}
+    want, e = wanted_connections(), exe()
+    if not want or not e:
+        return res
+    code, data = admin("/api/providers")
+    if code != 200 or not isinstance(data, dict):
+        res["failed"].append(f"список провайдеров OmniRoute недоступен (HTTP {code})")
+        return res
+    have = {c.get("name") for c in data.get("connections", [])}
+    for prov, name, key in want:
+        if name in have:
+            continue
+        env = dict(_node_env(), OMNIROUTE_BASE_URL=root_url(), NO_COLOR="1", ISTORIK_OMNI_CRED=key)
+        try:
+            r = subprocess.run([e, "providers", "add", prov, "--name", name, "--credential-env", "ISTORIK_OMNI_CRED", "--yes",
+                                "--json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                               env=env, creationflags=NOWIN)
+            if r.returncode == 0:
+                res["added"].append(prov)
+            else:
+                res["failed"].append(f"{prov}: {(r.stderr or r.stdout)[-160:].strip()}")
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            res["failed"].append(f"{prov}: {ex}")
+    return res
+
+
+def setup(say=None) -> dict:
+    """После запуска OmniRoute: ключ шлюза + ваши ключи внутри него. Безопасно вызывать много раз."""
+    say = say or (lambda _t: None)
+    out: dict[str, Any] = {"key": False, "added": [], "failed": []}
+    if str(config().at("providers.opts.omniroute_autokeys") or "1") != "1":
+        return out
+    try:
+        ensure_gateway_key()
+        out["key"] = True
+    except Exception as ex:  # noqa: BLE001
+        out["failed"].append(str(ex))
+    try:
+        r = sync_user_keys()
+        out["added"], out["failed"] = r["added"], out["failed"] + r["failed"]
+    except Exception as ex:  # noqa: BLE001
+        out["failed"].append(str(ex))
+    if out["added"]:
+        say("OmniRoute: подключил ваши ключи — " + ", ".join(sorted(set(out["added"]))))
+    if out["failed"]:
+        import logging
+        logging.getLogger("istorik.providers").warning("OmniRoute setup: %s", " | ".join(out["failed"])[:500])
+    try:
+        from ..core.status import monitor
+        monitor().refresh("omniroute")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 _auto = {"done": False}
 _auto_lock = __import__("threading").Lock()
 
@@ -200,6 +327,7 @@ def autostart(say=None) -> str:
         return "off"
     st = probe(2.0)
     if st["running"]:
+        setup(say)
         return "running"
     if st.get("port_busy"):
         say(f"OmniRoute: {st.get('error')}")
@@ -208,6 +336,7 @@ def autostart(say=None) -> str:
         ok, msg = start(90.0)
         if ok:
             say("OmniRoute запущен")
+            setup(say)
             return "started"
         say(f"OmniRoute: {msg}")
         return f"failed: {msg}"
@@ -261,11 +390,16 @@ class OmniRouteText(OpenAICompat):
             monitor().put("omniroute", st)
         return True, ""
 
-    def model_name(self, tier: str = "flash") -> str:
-        m = (config().at("providers.opts.omniroute_model") or "").strip()
-        if m and m not in self._bad_models:
-            return m
-        return "auto"
+    def model_name(self, tier: str = "flash", json_mode: bool = False) -> str:
+        """Свой ИИ для каждого шага: сценарий и проверка (tier pro) — самый сильный; короткие JSON-шаги (разметка,
+        промты кадров) — быстрый; остальное — общий. Всё настраивается в «Источниках», по умолчанию решает OmniRoute."""
+        o = lambda k, d: (config().at(f"providers.opts.{k}") or d).strip()  # noqa: E731
+        m = o("omniroute_model", "auto")
+        if tier == "pro":
+            m = o("omniroute_model_pro", m)
+        elif json_mode:
+            m = o("omniroute_model_fast", m)
+        return m if m not in self._bad_models else "auto"
 
     def _complete(self, messages, temperature, max_tokens, schema, tier, deadline):
         total = min(float(config().at("llm.omniroute_timeout", 600) or 600), deadline or 1e9)
@@ -275,7 +409,7 @@ class OmniRouteText(OpenAICompat):
         last_err = ""
         want_json = schema is not None or str((messages[-1] if messages else {}).get("content", "")).endswith(JSON_SUFFIX)
         for attempt in range(3):
-            model = self.model_name(tier)
+            model = self.model_name(tier, want_json)
             body: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature, "stream": True,
                                     "max_tokens": min(int(max_tokens), 16384)}
             if want_json:
@@ -400,3 +534,107 @@ class _Retry(Exception):
     def __init__(self, msg: str, bad_model: bool = False, drop_schema: bool = False):
         super().__init__(msg)
         self.bad_model, self.drop_schema = bad_model, drop_schema
+
+
+# ---------- кадры и озвучка через OmniRoute ----------
+def _post(path: str, body: dict, timeout: float) -> httpx.Response:
+    try:
+        r = httpx.post(base_url() + path, json=body, headers=_headers(), timeout=httpx.Timeout(timeout, connect=3))
+    except httpx.TimeoutException as e:
+        raise TemporaryError(f"OmniRoute не ответил за {int(timeout)} с") from e
+    except httpx.HTTPError as e:
+        raise ProviderUnavailable(f"OmniRoute недоступен ({type(e).__name__})") from e
+    if r.status_code == 429:
+        raise ProviderQuota("OmniRoute: лимит", time.time() + max(30, _reset_seconds(r) or 120))
+    if r.status_code in (401, 403, 402, 404, 400) or r.status_code >= 500:
+        raise ProviderUnavailable(f"OmniRoute HTTP {r.status_code}: {r.text[:160]} — подключите провайдер картинок/голоса "
+                                  "в панели OmniRoute → Providers")
+    return r
+
+
+def _ready():
+    if mock_mode():
+        return True, ""
+    from ..core.status import monitor
+    st = monitor().get("omniroute") or {}
+    if not st.get("running") and not probe(2.0)["running"]:
+        if not exe():
+            raise NotConfigured("OmniRoute не установлен")
+        ok, msg = start(60.0)
+        if not ok:
+            return False, f"OmniRoute: {msg}"
+    return True, ""
+
+
+class OmniRouteImages:
+    """Кадры через OmniRoute (/v1/images/generations): модель — omniroute_image_model или выбор OmniRoute."""
+    pid = "omniroute"
+    parallel = False
+
+    @property
+    def info(self):
+        from .catalog import CATALOG
+        return CATALOG["images"]["omniroute"]
+
+    def configured(self) -> bool:
+        return mock_mode() or bool(exe())
+
+    def available(self):
+        return _ready()
+
+    def model_name(self) -> str:
+        return (config().at("providers.opts.omniroute_image_model") or "auto").strip()
+
+    def generate(self, frame: dict, deadline: float | None = None) -> bytes:
+        body = {"prompt": frame["prompt"][:3000], "n": 1, "size": "1344x768", "response_format": "b64_json"}
+        if self.model_name() != "auto":
+            body["model"] = self.model_name()
+        r = _post("/images/generations", body, min(240, deadline or 240))
+        try:
+            d = (r.json().get("data") or [{}])[0]
+        except ValueError as e:
+            raise BadResponse("OmniRoute: не картинка") from e
+        if d.get("b64_json"):
+            import base64
+            return base64.b64decode(d["b64_json"])
+        if d.get("url"):
+            img = httpx.get(d["url"], timeout=60, follow_redirects=True)
+            if img.status_code == 200:
+                return img.content
+        raise BadResponse("OmniRoute вернул пустой ответ вместо кадра")
+
+
+class OmniRouteVoice:
+    """Озвучка через OmniRoute (/v1/audio/speech): модель и голос — omniroute_tts_model / omniroute_tts_voice."""
+    pid = "omniroute"
+
+    @property
+    def info(self):
+        from .catalog import CATALOG
+        return CATALOG["voice"]["omniroute"]
+
+    def configured(self) -> bool:
+        return mock_mode() or bool(exe())
+
+    def available(self):
+        return _ready()
+
+    def model_name(self) -> str:
+        return (config().at("providers.opts.omniroute_tts_model") or "auto").strip()
+
+    def tts(self, text: str, voice: str, direction: str, deadline: float | None = None):
+        import tempfile
+
+        from .voice import _decode_to_pcm
+        body = {"input": text, "voice": (config().at("providers.opts.omniroute_tts_voice") or voice or "alloy"),
+                "response_format": "mp3", "instructions": direction or ""}
+        if self.model_name() != "auto":
+            body["model"] = self.model_name()
+        r = _post("/audio/speech", body, min(300, deadline or 300))
+        if not r.content or r.headers.get("content-type", "").startswith("application/json"):
+            raise BadResponse("OmniRoute вернул не звук")
+        sr = int(config().at("voice.sample_rate", 24000))
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "a.mp3"
+            f.write_bytes(r.content)
+            return _decode_to_pcm(f, sr), sr

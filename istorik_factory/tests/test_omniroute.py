@@ -152,7 +152,7 @@ def test_stream_json_cyrillic_and_progress(isolated, monkeypatch):
         obj, _ = o.generate_json_ex("Верни объект", cache=False)
         assert obj == {"title": "Казахское ханство", "ok": True}
         b = fake.bodies[-1]
-        assert b["model"] == "auto" and b["stream"] is True and b["response_format"] == {"type": "json_object"}
+        assert b["model"] == "auto/fast" and b["stream"] is True and b["response_format"] == {"type": "json_object"}
         assert "Authorization" not in json.dumps(b), "ключ шлюза не обязателен"
         assert seen and seen[-1]["data"]["provider"] == "omniroute"
     finally:

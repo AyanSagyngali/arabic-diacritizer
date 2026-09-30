@@ -350,6 +350,9 @@ class MockImages(ImageBase):
 def make_image(pid: str):
     if mock_mode():
         return MockImages(pid)
+    if pid == "omniroute":
+        from .omniroute import OmniRouteImages
+        return OmniRouteImages()
     cls = {"gemini_api": GeminiImages, "flow": FlowImages, "comfyui": ComfyUI, "pollinations": Pollinations, "hf": HFImages,
            "none": NoImages}.get(pid)
     if not cls:

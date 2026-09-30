@@ -89,6 +89,9 @@ CATALOG: dict[str, dict[str, Info]] = {
                          "Ваш Chrome с входом в Google: Generate speech в aistudio.google.com, голос Sadaltager, по частям. "
                          "Медленно; может нарушать правила Google — включается отдельно.", screen=True, needs_ack=True,
                          parallel=1),
+        "omniroute": Info("omniroute", "voice", "OmniRoute — озвучка", "free", "зависит от подключённого провайдера",
+                          "Через OmniRoute (/v1/audio/speech): голос даёт провайдер, подключённый в его панели (Providers). "
+                          "Модель и голос — omniroute_tts_model / omniroute_tts_voice.", install="omniroute", parallel=1),
         "piper": Info("piper", "voice", "Piper — локально", "local", "",
                       "Процессор, голос ≈ 60 МБ. Очень быстро, звучит проще Gemini.", install="piper", local=True, parallel=2),
         "silero": Info("silero", "voice", "Silero — локально", "local", "",
@@ -112,6 +115,9 @@ CATALOG: dict[str, dict[str, Info]] = {
         "comfyui": Info("comfyui", "images", "ComfyUI — локально (FLUX / SDXL)", "local", "",
                         "Видеокарта NVIDIA от 8 ГБ, 10–25 ГБ на диске. На 4 ГБ практически бесполезно (минуты на кадр).",
                         install="comfyui", local=True, parallel=1),
+        "omniroute": Info("omniroute", "images", "OmniRoute — кадры", "free", "зависит от подключённого провайдера",
+                          "Через OmniRoute (/v1/images/generations): рисует провайдер, подключённый в его панели (Providers). "
+                          "Модель — omniroute_image_model.", install="omniroute", parallel=1),
         "pollinations": Info("pollinations", "images", "Pollinations (FLUX)", "free", "≈1 кадр в 15 с",
                              "Без ключа. С бесплатным токеном — быстрее и без водяного знака.", secret="POLLINATIONS_TOKEN",
                              optional_secret=True, parallel=1),
@@ -124,10 +130,10 @@ CATALOG: dict[str, dict[str, Info]] = {
 
 # источники без ключа/установки пропускаются молча; экранные — только после согласия; «Нет» — только осознанно
 DEFAULT_CHAINS = {"text": ["omniroute", "gemini", "ollama", "groq", "openrouter", "gemini_web"],
-                  "voice": ["gemini", "aistudio", "piper"],
-                  "images": ["gemini_api", "pollinations"]}
+                  "voice": ["omniroute", "gemini", "aistudio", "piper"],
+                  "images": ["omniroute", "gemini_api", "pollinations"]}
 FLOW_CHAIN = ["flow", "gemini_api", "pollinations"]
-NEW_PROVIDERS = {"text": ["omniroute"]}  # добавляются в существующие цепочки один раз (кроме выбранных вручную)
+NEW_PROVIDERS = {"text": ["omniroute"], "voice": ["omniroute"], "images": ["omniroute"]}  # добавляются в существующие цепочки один раз (кроме выбранных вручную)
 
 OLLAMA_MODELS = {  # "" — автоматически лучшая из установленных; дальше — лучшие для русского текста (Qwen3 — сильнее всех в неанглийских задачах; Gemma 3 — запасной)
     "": "Автоматически — лучшая установленная",

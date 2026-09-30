@@ -20,7 +20,7 @@ from pathlib import Path
 from .providers.catalog import CATALOG, DEFAULT_CHAINS, FLOW_CHAIN, NEW_PROVIDERS
 
 PARTS = ("text", "voice", "images")
-MIGRATIONS = ("migr:omniroute_first",)  # разовые переносы старых настроек (записываются в settings.json → known)
+MIGRATIONS = ("migr:omniroute_first", "migr:omniroute_media")  # разовые переносы старых настроек (записываются в settings.json → known)
 OPTS = {
     "ollama_model": "", "ollama_url": "http://127.0.0.1:11434",
     "edge_voice": "ru-RU-DmitryNeural", "silero_speaker": "aidar", "piper_voice": "ru_RU-denis-medium",
@@ -37,6 +37,9 @@ OPTS = {
     "omniroute_url": "", "omniroute_model": "auto", "omniroute_stop_on_exit": "",
     "omniroute_search": "1",          # факты для исследования — ещё и из поиска OmniRoute
     "omniroute_auto": "1",            # при запуске программы сам ставит и запускает OmniRoute
+    "omniroute_autokeys": "1",        # сам создаёт ключ шлюза OmniRoute и передаёт ему ваши ключи Gemini/Groq/…
+    "omniroute_model_pro": "", "omniroute_model_fast": "auto/fast",  # сценарий/проверка и короткие JSON-шаги
+    "omniroute_image_model": "auto", "omniroute_tts_model": "auto", "omniroute_tts_voice": "",
     "openai_model": "", "xai_model": "", "deepseek_model": "", "custom_model": "",
 }
 _lock = threading.Lock()
@@ -92,6 +95,10 @@ def load(cfg) -> dict:
     if raw.get("chains") and "migr:omniroute_first" not in known:  # один раз: всё через OmniRoute — он первым в тексте
         t = chains["text"]
         chains["text"] = ["omniroute"] + [x for x in t if x != "omniroute"]
+        known.add("omniroute")
+    if raw.get("chains") and "migr:omniroute_media" not in known:  # один раз: кадры и озвучка тоже через OmniRoute первым
+        for part in ("voice", "images"):
+            chains[part] = ["omniroute"] + [x for x in chains[part] if x != "omniroute"]
         known.add("omniroute")
     if raw.get("chains"):  # новые источники (например OmniRoute) один раз встраиваются в старые цепочки по умолчанию
         for part, new in NEW_PROVIDERS.items():

@@ -408,6 +408,8 @@ def _omniroute(name: str) -> None:
     ok, msg = om.start(120.0)
     if not ok:
         raise RuntimeError(f"OmniRoute установлен, но не запустился: {msg}")
+    _set(name, text="Подключаю ключ OmniRoute и ваши ключи…", pct=None)
+    om.setup()
 
 
 INSTALLERS = {"edge": lambda n: _pip(["edge-tts"], n, "Устанавливаю edge-tts…"), "piper": _piper, "silero": _silero,

@@ -372,6 +372,9 @@ def make_voice(pid: str):
         return aistudio.make()
     if mock_mode():
         return MockVoice(pid)
+    if pid == "omniroute":
+        from .omniroute import OmniRouteVoice
+        return OmniRouteVoice()
     cls = {"gemini": GeminiTTS, "piper": PiperTTS, "silero": SileroTTS, "chatterbox": ChatterboxTTS, "edge": EdgeTTS,
            "none": NoVoice}.get(pid)
     if not cls:
