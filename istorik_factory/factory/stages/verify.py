@@ -124,9 +124,10 @@ def run(ctx) -> None:
         from ..media.render import grab_frame, probe_duration, render
         out = p.export_dir / f"{p.data['id']}_preview.mp4"
         try:
-            render(plan, p.images_dir, master, p.edit_dir / "subtitles.srt" if cfg.at("export.burn_subtitles") else None, out,
+            render(plan, p.images_dir, master, p.edit_dir / "subtitles.srt", out,
                    int(cfg.at("export.local_width")), int(cfg.at("export.local_height")),
-                   progress=lambda d, t: p.progress("verify", 4, 6, f"Локальный рендер: {d}/{t} кадров"), check_stop=ctx.check_stop)
+                   progress=lambda d, t: p.progress("verify", 4, 6, f"Собираю видео: кадр {d}/{t}…"), check_stop=ctx.check_stop,
+                   burn=bool(cfg.at("export.burn_subtitles", False)))
             vd = probe_duration(out)
             ch.add("Экспорт", "локальное видео отрендерено", vd > 0 and abs(vd - dur) < 1.0, f"{vd:.1f} с")
             from PIL import Image, ImageStat
@@ -165,20 +166,26 @@ def run(ctx) -> None:
 
 
 def _semantic(ctx, ch: Checks, frames: list[dict]) -> None:
-    """Выборочная проверка смысла: 10 кадров (начало/середина/конец) оцениваются моделью со зрением."""
+    """Выборочная проверка смысла: до 10 кадров (начало/середина/конец) параллельно оценивает модель со зрением."""
+    from ..core.parallel import parallel_map, workers
     from ..llm.gemini import llm
     n = len(frames)
     idx = sorted({0, 1, 2, n // 4, n // 3, n // 2, 2 * n // 3, 3 * n // 4, n - 2, n - 1} & set(range(n)))
     low = []
-    for i in idx:
+
+    def one(i):
         f = frames[i]
-        try:
-            r = llm().image_matches((ctx.project.images_dir / f"{f['frame_id']}.png").read_bytes(), f["text"])
-            if int(r.get("score", 10)) < 4 or r.get("has_text"):
-                low.append(f"{f['frame_id']} ({r.get('score')}: {r.get('comment', '')[:60]})")
-        except Exception as e:
-            ctx.log.warn(f"semantic check {f['frame_id']}: {e}", "verify")
-    ch.add("Кадры", "соответствуют смыслу (выборка)", not low, "; ".join(low), "warn")
+        return f, llm().image_matches((ctx.project.images_dir / f"{f['frame_id']}.png").read_bytes(), f["text"])
+
+    def got(i, res):
+        f, r = res
+        if int(r.get("score", 10)) < 4 or r.get("has_text"):
+            low.append(f"{f['frame_id']} ({r.get('score')}: {str(r.get('comment', ''))[:60]})")
+
+    ctx.project.operation("Проверяю смысл кадров выборочно…")
+    parallel_map(one, idx, workers("llm", 4), on_result=got, check=ctx.check_stop,
+                 on_error=lambda i, e: ctx.log.warn(f"semantic check {frames[i]['frame_id']}: {e}", "verify"))
+    ch.add("Кадры", "соответствуют смыслу (выборка)", not low, "; ".join(sorted(low)), "warn")
 
 
 def _chatcut_checks_and_export(ctx, ch: Checks, plan: dict, dur: float) -> dict:
@@ -280,6 +287,20 @@ def _srt_t(s: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
 
 
+def stage_times(p) -> str:
+    from ..core.project import STAGES
+    rows, total = [], 0.0
+    for k, label in STAGES:
+        st = p.data["stages"].get(k, {})
+        sec = float(st.get("elapsed", 0) or 0)
+        if st.get("status") == "running" and st.get("run_started"):
+            sec += time.time() - st["run_started"]
+        total += sec
+        rows.append(f"  {label:<24}{int(sec // 60):>3}:{int(sec % 60):02d}")
+    rows.append(f"  {'ИТОГО':<24}{int(total // 60):>3}:{int(total % 60):02d}")
+    return "\n".join(rows)
+
+
 def build_report(p, r: dict, ch: Checks) -> str:
     line = "━" * 36
     ok = lambda b: "✓" if b else "✗"  # noqa: E731
@@ -298,6 +319,7 @@ def build_report(p, r: dict, ch: Checks) -> str:
         "Субтитры:", ok(sub_ok), "",
         "Проверка:", f"{ok(not ch.errors)}  {r['checks_total'] - r['checks_failed']}/{r['checks_total']} проверок пройдено", "",
         "Ошибки:", ("\n".join(f"- {e}" for e in errs) if errs else "нет"), "",
+        "Время по этапам:", stage_times(p), "",
         "Проект:", str(p.root), "",
         "Экспорт:", "\n".join(x for x in (r.get("export_chatcut"), r.get("export_local")) if x) or "—", "",
         line,

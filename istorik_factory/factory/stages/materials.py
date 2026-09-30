@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from ..core.storage import read_json, write_json, write_text
-from ..llm.gemini import llm
+from ..llm.gemini import S, llm
 
 EDITORIAL = """Ты — режиссёр монтажа исторического документального канала «ИСТОРИК». Ниже сценарий ролика «{title}» по предложениям [id].
 Глава 0 — вступление (хук). Определи графические акценты, строго опираясь на текст.
@@ -19,18 +19,21 @@ EDITORIAL = """Ты — режиссёр монтажа историческог
    Только даты, реально названные в этом предложении.
 5. impacts — предложения-кульминации (битва, катастрофа, резкий поворот): kind = battle|catastrophe|turn. Не более {max_impacts}.
 
-Верни JSON:
-{{"title_reveal_sentence_id": 0,
-  "hook_punches": [{{"sentence_id": 0, "text": "..."}}],
-  "name_titles": [{{"sentence_id": 0, "name": "...", "caption": "..."}}],
-  "date_stamps": [{{"sentence_id": 0, "year": "...", "caption": "..."}}],
-  "impacts": [{{"sentence_id": 0, "kind": "battle"}}]}}
 
 Личности из исследования: {figures}
 
 СЦЕНАРИЙ:
 {sentences}
 """
+
+EDITORIAL_SCHEMA = S("object", props={
+    "title_reveal_sentence_id": S("integer"),
+    "hook_punches": S("array", items=S("object", props={"sentence_id": S("integer"), "text": S("string")})),
+    "name_titles": S("array", items=S("object", props={"sentence_id": S("integer"), "name": S("string"), "caption": S("string")})),
+    "date_stamps": S("array", items=S("object", props={"sentence_id": S("integer"), "year": S("string"), "caption": S("string")})),
+    "impacts": S("array", items=S("object", props={"sentence_id": S("integer"),
+                                                   "kind": S("string", enum=["battle", "catastrophe", "turn"])})),
+})
 
 # шаблоны графики канала (из проекта-примера ChatCut): имя → (ширина, высота, left, top)
 MG_LAYOUT = {
@@ -75,7 +78,8 @@ def run(ctx) -> None:
         editorial = llm().generate_json(EDITORIAL.format(
             title=script["title"], max_punch=ed["hook_punches_max"], max_names=ed["name_titles_max"],
             max_dates=ed["date_stamps_max"], max_impacts=max(4, len(script["chapters"]) * 2),
-            figures=", ".join(f.get("name", "") for f in research.get("figures", [])), sentences=listing[:150000]), temperature=0.3)
+            figures=", ".join(f.get("name", "") for f in research.get("figures", [])), sentences=listing[:150000]),
+            schema=EDITORIAL_SCHEMA, temperature=0.3, tier="flash", thinking="off")
         editorial = _clean_editorial(editorial, script)
         write_json(edir / "editorial.json", editorial)
     p.progress("materials", 2, 4, "Материалы: монтажный план")

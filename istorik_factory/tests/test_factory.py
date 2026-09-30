@@ -23,6 +23,9 @@ from factory import config as C  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
+    monkeypatch.setenv("FACTORY_MOCK", "1")
+    from factory.llm.gemini import reset_client
+    reset_client()
     cfg = C.load_config()
     cfg["paths"]["projects"] = str(tmp_path / "projects")
     cfg["paths"]["data"] = str(tmp_path / "data")

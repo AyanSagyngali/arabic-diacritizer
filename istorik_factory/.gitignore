@@ -7,3 +7,7 @@ projects/*
 data/*
 !data/.gitkeep
 browser_profile/
+logs/
+assets/
+.pytest_cache/
+tests/screenshots/

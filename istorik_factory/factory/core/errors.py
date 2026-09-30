@@ -1,0 +1,103 @@
+"""Исключения движка, общий флаг отмены и перевод любой ошибки в понятное сообщение «что случилось → что сделать»."""
+from __future__ import annotations
+
+import datetime as dt
+import threading
+
+CANCEL = threading.Event()  # выставляется кнопкой «Остановить»: все ожидания в движке прерываются
+
+
+class StopRequested(Exception):
+    """Пользователь остановил производство."""
+
+
+class StageStalled(Exception):
+    """Сторож (watchdog) прервал зависший шаг."""
+
+
+class LLMError(RuntimeError):
+    """Ошибка обращения к Gemini."""
+
+
+class ModelUnavailable(LLMError):
+    pass
+
+
+class LLMTimeout(LLMError):
+    pass
+
+
+class BadResponse(LLMError):
+    """Пустой ответ / битый JSON / отказ модели."""
+
+
+class RegionBlocked(LLMError):
+    pass
+
+
+class AllKeysExhausted(LLMError):
+    def __init__(self, reset_at: float, total: int, quota: int, invalid: int):
+        self.reset_at, self.total, self.quota, self.invalid = reset_at, total, quota, invalid
+        super().__init__(f"квота исчерпана на всех ключах ({quota} в квоте, {invalid} неверных из {total}); "
+                         f"сброс ~{fmt_time(reset_at)}")
+
+
+class NoValidKeys(LLMError):
+    def __init__(self, total: int, reasons: list[str]):
+        self.total, self.reasons = total, reasons
+        super().__init__(f"нет рабочих ключей Gemini (всего {total}): " + "; ".join(reasons[:3]))
+
+
+def fmt_time(ts: float) -> str:
+    return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def sleep(seconds: float) -> None:
+    """Прерываемое ожидание: «Остановить» срабатывает мгновенно."""
+    if CANCEL.wait(max(0.0, seconds)):
+        raise StopRequested()
+
+
+def humanize(exc: BaseException) -> dict:
+    """→ {title, fix, detail}: короткий заголовок, что сделать, технические подробности."""
+    name = type(exc).__name__
+    text = str(exc)
+    if isinstance(exc, AllKeysExhausted):
+        return {"title": f"Квота Gemini исчерпана на всех ключах — сброс примерно в {fmt_time(exc.reset_at)}",
+                "fix": "Добавьте ещё ключи в панели («Ключи») или нажмите «Продолжить проект» после сброса квоты.",
+                "detail": text}
+    if isinstance(exc, NoValidKeys):
+        return {"title": "Нет ни одного рабочего ключа Gemini",
+                "fix": "Откройте «Ключи», удалите неверные и вставьте рабочие ключи из aistudio.google.com/apikey.",
+                "detail": text}
+    if isinstance(exc, RegionBlocked):
+        return {"title": "Gemini API недоступен из вашего региона",
+                "fix": "Включите VPN (страна, где работает Gemini API) и нажмите «Продолжить проект».", "detail": text}
+    if isinstance(exc, LLMTimeout):
+        return {"title": "Gemini не ответил вовремя",
+                "fix": "Проверьте интернет/VPN и нажмите «Продолжить проект» — работа продолжится с того же места.",
+                "detail": text}
+    if isinstance(exc, ModelUnavailable):
+        return {"title": "Нужная модель Gemini недоступна для ваших ключей",
+                "fix": "Нажмите «Проверить систему» — список моделей обновится автоматически.", "detail": text}
+    if isinstance(exc, BadResponse):
+        return {"title": "Gemini вернул пустой или испорченный ответ",
+                "fix": "Нажмите «Продолжить проект» — шаг будет повторён.", "detail": text}
+    if isinstance(exc, StageStalled):
+        return {"title": "Шаг завис и был перезапущен сторожем", "fix": "Ничего делать не нужно.", "detail": text}
+    if name == "ChatCutError":
+        return {"title": "ChatCut не выполнил операцию", "fix": "Проверьте вход в ChatCut и нажмите «Продолжить проект».",
+                "detail": text}
+    if name == "FlowError":
+        return {"title": "Google Flow не сгенерировал кадр",
+                "fix": "Проверьте вход в Google в окне Flow или переключите генератор кадров на Gemini API.", "detail": text}
+    if isinstance(exc, (ModuleNotFoundError, ImportError)):
+        return {"title": f"Не установлен компонент: {getattr(exc, 'name', text)}",
+                "fix": "Запустите установку заново (install.py) и дождитесь её окончания.", "detail": text}
+    if isinstance(exc, FileNotFoundError):
+        return {"title": "Не найден нужный файл", "fix": "Нажмите «Продолжить проект» — недостающее будет создано заново.",
+                "detail": text}
+    if "ffmpeg" in text.lower():
+        return {"title": "Ошибка ffmpeg при сборке видео", "fix": "Нажмите «Проверить систему» → «Исправить».", "detail": text}
+    return {"title": f"Ошибка: {text[:160] or name}", "fix": "Нажмите «Продолжить проект» — работа продолжится с последнего шага.",
+            "detail": f"{name}: {text}"}

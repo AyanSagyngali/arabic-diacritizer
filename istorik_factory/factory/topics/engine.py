@@ -1,18 +1,31 @@
-"""Актуальные темы: канал «ИСТОРИК» + конкуренты (YouTube) + поиск Google (Gemini grounding) → карточки тем."""
+"""Актуальные темы: канал «ИСТОРИК» + конкуренты (YouTube, если есть ключ) + поиск Google через Gemini → карточки тем.
+
+Поиск запускается автоматически при старте панели; ход поиска и ошибки видны в панели (событие «topics»).
+Без ключа YouTube работает только через Gemini + Google Search.
+"""
 from __future__ import annotations
 
 import datetime as dt
-import json
+import re
 import threading
 import time
 
-from ..config import channel_profile, config
+from ..config import channel_profile, config, mock_mode
+from ..core import events
+from ..core.errors import humanize
 from ..core.storage import read_json, write_json
-from ..llm.gemini import llm
+from ..llm.gemini import S, llm, strs
 from .youtube import YouTube
 
-_state = {"running": False, "error": None, "stage": ""}
+_state = {"running": False, "error": None, "fix": None, "stage": "", "started": None, "mode": None}
 _lock = threading.Lock()
+
+TOPIC_SCHEMA = S("array", items=S("object", props={
+    "title": S("string"), "why_interesting": S("string"), "period": S("string"), "key_events": strs(),
+    "sources": S("array", items=S("object", props={"title": S("string"), "url": S("string")})),
+    "competitor_videos": S("array", items=S("object", props={"title": S("string"), "channel": S("string"),
+                                                                "views": S("integer"), "url": S("string")})),
+    "fit": S("string"), "angle": S("string"), "suggested_minutes": S("integer"), "score": S("integer")}))
 
 PROMPT = """Ты — продюсер и контент-стратег исторического YouTube-канала «{channel}».
 Ниша: {niche}
@@ -20,31 +33,28 @@ PROMPT = """Ты — продюсер и контент-стратег исто�
 Форматы канала: {formats}
 Сегодня: {today}.
 
-Уже сделанные темы канала (НЕ предлагай повторы и почти-повторы):
+Уже сделанные или уже предложенные темы (НЕ предлагай повторы и почти-повторы):
 {published}
 
-Свежие видео канала и их просмотры (что заходит аудитории):
+Свежие видео канала и их просмотры:
 {own}
 
-Свежие видео конкурентов/похожих исторических каналов (просмотры = спрос; НЕ копируй их, ищи свой угол и мало раскрытые аспекты):
+Свежие видео похожих исторических каналов (просмотры = спрос; НЕ копируй, ищи свой угол и мало раскрытые аспекты):
 {competitors}
 
-Задача: с помощью поиска Google найди, что сейчас обсуждают и ищут по истории в этой нише: годовщины и памятные даты ближайших
-месяцев, новые археологические находки и исследования, фильмы/сериалы/игры на историческую тему, споры в медиа, популярные запросы.
-Предложи {count} сильных тем для полноценного документального ролика канала — разных по периодам и типам (государство, война,
-личность, трагедия, быт, загадка). Каждая тема должна позволять драматичный хук, хронологическое повествование и главы.
+С помощью поиска Google найди, что сейчас обсуждают и ищут по истории в этой нише: годовщины ближайших месяцев, новые находки
+и исследования, фильмы/сериалы/игры на историческую тему, споры в медиа, популярные запросы.
+Предложи {count} сильных тем для документального ролика — разных по периодам и типам (государство, война, личность, трагедия,
+быт, загадка). Для каждой: название (грамотно, как заголовок YouTube), почему интересна сейчас, период, 3–6 основных событий,
+источники со ссылками, похожие видео конкурентов (если нашёл), почему подходит каналу, уникальный угол, рекомендуемая длительность
+в минутах, оценка 0–100.
+"""
 
-Верни JSON-массив:
-[{{"title": "Название ролика для YouTube (как на канале, напр. «Вся история … за N минут» или сильный документальный заголовок)",
-   "why_interesting": "почему тема интересна сейчас (конкретно: годовщина/находка/тренд/спрос)",
-   "period": "годы или века",
-   "key_events": ["3–6 основных событий"],
-   "sources": [{{"title": "...", "url": "https://..."}}],
-   "competitor_videos": [{{"title": "...", "channel": "...", "views": 0, "url": "..."}}],
-   "fit": "почему подходит каналу и аудитории",
-   "angle": "уникальный угол подачи, отличающий от конкурентов",
-   "suggested_minutes": 15,
-   "score": 0-100}}]
+NORMALIZE_SCHEMA = S("object", props={"title": S("string"), "alternatives": strs(), "changed": S("boolean")})
+NORMALIZE = """Название исторического YouTube-ролика ввёл пользователь, возможно с опечатками: «{raw}».
+Исправь орфографию, падежи и регистр (заглавная только в начале и у имён собственных), убери лишние пробелы и кавычки.
+Смысл и формат не меняй («Вся история России» остаётся «Вся история России»). Дай 2 альтернативных, более цепляющих варианта
+для YouTube в стиле канала «ИСТОРИК» (серьёзно, без кликбейта).
 """
 
 
@@ -53,7 +63,10 @@ def status() -> dict:
 
 
 def cached() -> dict:
-    return read_json(config().path("data") / "topics.json", {"topics": [], "updated_at": None}) or {"topics": [], "updated_at": None}
+    d = read_json(config().path("data") / "topics.json", None) or {}
+    d.setdefault("topics", [])
+    d.setdefault("updated_at", None)
+    return d
 
 
 def is_fresh() -> bool:
@@ -64,104 +77,152 @@ def is_fresh() -> bool:
     return age.total_seconds() < 3600 * float(config().at("topics.cache_hours", 12))
 
 
-def refresh_async() -> bool:
+def _set(**kw) -> None:
+    _state.update(kw)
+    events.publish("topics_status", dict(_state))
+
+
+def refresh_async(more: bool = False) -> bool:
     with _lock:
         if _state["running"]:
             return False
-        _state.update(running=True, error=None, stage="Сбор данных")
-    threading.Thread(target=_refresh_safe, daemon=True, name="topics").start()
+        _set(running=True, error=None, fix=None, stage="Готовлюсь к поиску…", started=time.time(), mode="more" if more else "new")
+    threading.Thread(target=_refresh_safe, args=(more,), daemon=True, name="topics").start()
     return True
 
 
-def _refresh_safe() -> None:
+def _refresh_safe(more: bool) -> None:
     try:
-        refresh()
-    except Exception as e:  # ошибка показывается в панели
-        _state["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        _state["running"] = False
-        _state["stage"] = ""
+        refresh(more=more)
+        _set(running=False, stage="")
+    except Exception as e:  # ошибка показывается в панели понятным текстом
+        h = humanize(e)
+        _set(running=False, stage="", error=h["title"], fix=h["fix"])
+        events.toast(f"Поиск тем: {h['title']}", "error", fix=h["fix"])
 
 
-def refresh() -> list[dict]:
+def refresh(more: bool = False) -> list[dict]:
     cfg = config()
     prof = channel_profile()
     chan = prof["channel"]
     yt = YouTube()
     own, comp = [], []
+    deadline = time.time() + float(cfg.at("topics.youtube_seconds", 20))  # YouTube не должен задерживать поиск
 
-    _state["stage"] = "Видео канала"
     ref = chan.get("youtube_channel_id") or chan.get("youtube_handle")
-    if ref:
+    if ref and not mock_mode():
+        _set(stage="Смотрю видео вашего канала…")
         try:
             cid = yt.resolve_channel(ref)
             if cid:
                 own = yt.channel_videos(cid, 30)
         except Exception:
             own = []
-
-    _state["stage"] = "Конкуренты"
-    for c in prof.get("competitors") or []:
-        try:
-            cid = yt.resolve_channel(c)
-            if cid:
-                comp += yt.channel_videos(cid, 10)
-        except Exception:
-            continue
-    if yt.has_api:
-        for q in cfg.at("topics.search_queries", []):
+    if not mock_mode():
+        comps = prof.get("competitors") or []
+        if comps:
+            _set(stage=f"Смотрю конкурентов ({len(comps)})…")
+        for c in comps:
+            if time.time() > deadline:
+                break
             try:
-                comp += yt.search_recent(q, int(cfg.at("topics.recent_days", 45)), 8)
+                cid = yt.resolve_channel(c)
+                if cid:
+                    comp += yt.channel_videos(cid, 10)
             except Exception:
                 continue
+        if yt.has_api:
+            _set(stage="Ищу свежие популярные ролики в нише…")
+            for q in cfg.at("topics.search_queries", []):
+                if time.time() > deadline:
+                    break
+                try:
+                    comp += yt.search_recent(q, int(cfg.at("topics.recent_days", 45)), 8)
+                except Exception:
+                    continue
     seen, uniq = set(), []
     for v in sorted(comp, key=lambda v: -(v.get("views") or 0)):
         if v.get("id") not in seen:
             seen.add(v.get("id"))
             uniq.append(v)
-    comp = uniq[:60]
+    comp = uniq[:40]
 
-    _state["stage"] = "Поиск актуальных тем (Google)"
+    _set(stage="Ищу актуальные темы в Google…")
+    old = cached()
     published = list(prof.get("published_topics") or []) + [v["title"] for v in own]
     from ..core.project import Project
     published += [p["title"] for p in Project.list_all()]
+    if more:
+        published += [t["title"] for t in old.get("topics", [])]
 
     def fmt(vs):
-        return "\n".join(f"- {v.get('title')} | {v.get('channel', '')} | {v.get('views', '?')} просмотров | {v.get('published', '')[:10]}"
-                         f" | {v.get('url', '')}" for v in vs) or "(нет данных — используй поиск Google по YouTube)"
+        return "\n".join(f"- {v.get('title')} | {v.get('channel', '')} | {v.get('views', '?')} просмотров | "
+                         f"{str(v.get('published', ''))[:10]} | {v.get('url', '')}" for v in vs) or \
+            "(нет данных — найди популярные ролики ниши через поиск Google)"
 
     g = llm()
     topics = g.generate_json(PROMPT.format(
         channel=chan["name"], niche=chan.get("niche", ""), audience=chan.get("audience", ""),
         formats="; ".join(chan.get("formats", [])), today=dt.date.today().isoformat(),
-        published="\n".join(f"- {t}" for t in dict.fromkeys(published)), own=fmt(own[:20]), competitors=fmt(comp[:40]),
-        count=int(cfg.at("topics.count", 8))), search=True, temperature=0.9)
+        published="\n".join(f"- {t}" for t in dict.fromkeys(published)), own=fmt(own[:15]), competitors=fmt(comp[:30]),
+        count=int(cfg.at("topics.count", 6))), search=True, schema=TOPIC_SCHEMA, temperature=0.9, cache=False)
     web = g.sources()
     if isinstance(topics, dict):
-        topics = topics.get("topics", [])
+        topics = topics.get("topics") or topics.get("items") or []
+    _set(stage="Оформляю карточки тем…")
     clean = []
     for t in topics:
         if not isinstance(t, dict) or not t.get("title"):
             continue
+        t["title"] = tidy_title(t["title"])
         t.setdefault("sources", [])
-        if not t["sources"] and web:
-            t["sources"] = web[:3]
-        t["id"] = f"t{int(time.time())}_{len(clean)}"
+        t["sources"] = [s for s in t["sources"] if isinstance(s, dict) and str(s.get("url", "")).startswith("http")] or web[:3]
+        t["id"] = f"t{int(time.time() * 1000)}_{len(clean)}"
+        t["created"] = dt.datetime.now().isoformat(timespec="seconds")
         clean.append(t)
+    if not clean:
+        raise RuntimeError("Gemini не вернул ни одной темы — попробуйте «Обновить темы» ещё раз")
     clean.sort(key=lambda t: -int(t.get("score") or 0))
+    result = (old.get("topics", []) + clean) if more else clean
     write_json(cfg.path("data") / "topics.json", {"updated_at": dt.datetime.now().isoformat(timespec="seconds"),
-                                                  "own_videos": own[:20], "competitor_videos": comp[:40], "topics": clean})
-    return clean
+                                                  "own_videos": own[:20], "competitor_videos": comp[:40], "topics": result})
+    events.publish("topics", {"count": len(result)})
+    return result
 
 
 def find(topic_id: str) -> dict | None:
     return next((t for t in cached().get("topics", []) if t.get("id") == topic_id), None)
 
 
-def custom(title: str) -> dict:
-    return {"id": f"custom_{int(time.time())}", "title": title.strip(), "why_interesting": "тема задана вручную", "period": "",
-            "key_events": [], "sources": [], "competitor_videos": [], "fit": "", "angle": "", "score": None}
+def tidy_title(raw: str) -> str:
+    """Механическая чистка: кавычки, пробелы, регистр («Вся История Россий» → «Вся история Россий»)."""
+    t = re.sub(r"\s+", " ", str(raw)).strip().strip("«»\"'“”„ ").strip()
+    t = re.sub(r"\s+([,.:;!?])", r"\1", t)
+    words = t.split(" ")
+    if len(words) > 1 and sum(1 for w in words if w[:1].isupper()) >= max(2, len(words) - 1):  # Всё С Заглавной → обычный регистр
+        common = {"история", "вся", "полная", "как", "почему", "жизнь", "в", "и", "за", "минут", "каждом", "ранге", "война", "великая",
+                  "империя", "ханство", "падение", "тайна", "последний", "последняя", "битва", "эпоха", "народ", "от", "до", "на"}
+        words = [words[0]] + [w.lower() if w.lower() in common else w for w in words[1:]]
+    t = " ".join(words)
+    return t[:1].upper() + t[1:] if t else t
 
 
-def dumps(t: dict) -> str:
-    return json.dumps(t, ensure_ascii=False)
+def normalize_title(raw: str) -> dict:
+    """→ {title, alternatives, changed}: исправленное название + варианты. Без ключа — только механическая чистка."""
+    base = tidy_title(raw)
+    if mock_mode() or not raw.strip():
+        return {"title": base, "alternatives": [], "changed": base != raw.strip()}
+    try:
+        r = llm().generate_json(NORMALIZE.format(raw=raw.strip()[:200]), schema=NORMALIZE_SCHEMA, tier="flash",
+                                thinking="off", temperature=0.3, deadline=30)
+        title = tidy_title(r.get("title") or base)
+        alts = [tidy_title(a) for a in (r.get("alternatives") or []) if a and tidy_title(a) != title][:3]
+        return {"title": title, "alternatives": alts, "changed": title != raw.strip()}
+    except Exception:
+        return {"title": base, "alternatives": [], "changed": base != raw.strip()}
+
+
+def custom(title: str, raw: str | None = None) -> dict:
+    return {"id": f"custom_{int(time.time())}", "title": title.strip(), "raw_title": raw or title,
+            "why_interesting": "тема задана вручную", "period": "", "key_events": [], "sources": [], "competitor_videos": [],
+            "fit": "", "angle": "", "score": None}

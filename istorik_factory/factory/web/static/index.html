@@ -2,209 +2,117 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="color-scheme" content="dark">
 <title>ИСТОРИК VIDEO FACTORY</title>
-<style>
-:root{--bg:#0f0e0c;--panel:#1a1814;--panel2:#221f1a;--line:#3a342a;--text:#eee6d6;--muted:#a3987f;--gold:#d4af37;--red:#c62828;--ok:#5fae6a;--warn:#e0a53a}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 "Segoe UI",Roboto,Arial,sans-serif}
-header{padding:18px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;background:linear-gradient(90deg,#16130f,#231d14)}
-header h1{margin:0;font:700 22px Georgia,serif;letter-spacing:3px;color:var(--gold)}
-header .sub{color:var(--muted);font-size:13px}
-main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:20px;padding:20px 28px;max-width:1600px;margin:0 auto}
-@media(max-width:1000px){main{grid-template-columns:1fr;padding:16px}}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
-h2{margin:0 0 12px;font:600 16px Georgia,serif;letter-spacing:1.5px;color:var(--gold);text-transform:uppercase}
-button{background:var(--gold);color:#1a1409;border:0;border-radius:6px;padding:9px 16px;font-weight:700;cursor:pointer;font-size:14px}
-button.ghost{background:transparent;color:var(--gold);border:1px solid var(--gold)}
-button.danger{background:transparent;color:#e57373;border:1px solid #e57373}
-button:disabled{opacity:.45;cursor:not-allowed}
-input,select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:14px}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.muted{color:var(--muted);font-size:13px}
-.topic{border:1px solid var(--line);border-radius:8px;padding:14px;margin:10px 0;background:var(--panel2)}
-.topic h3{margin:0 0 6px;font:600 17px Georgia,serif}
-.topic .lbl{color:var(--gold);font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-top:8px}
-.topic ul{margin:4px 0 0 18px;padding:0}
-.topic a{color:#d9c07a}
-.score{float:right;color:var(--gold);font-weight:700}
-.stage{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed #2c2820}
-.stage .mark{width:26px;font-weight:700;text-align:center}
-.stage .name{flex:0 0 190px}
-.bar{flex:1;height:10px;background:#2c2820;border-radius:5px;overflow:hidden}
-.bar>div{height:100%;background:var(--gold);transition:width .4s}
-.done .mark{color:var(--ok)} .failed .mark{color:#e57373} .running .mark{color:var(--gold)}
-.op{margin:12px 0;padding:10px 12px;background:var(--panel2);border-left:3px solid var(--gold);border-radius:4px}
-.log{font:12px/1.4 Consolas,monospace;background:#0b0a09;border:1px solid var(--line);border-radius:6px;padding:10px;height:220px;overflow:auto;white-space:pre-wrap}
-.report{font:13px/1.45 Consolas,monospace;white-space:pre-wrap;background:#0b0a09;border:1px solid var(--gold);border-radius:6px;padding:14px}
-.banner{background:#2a1f10;border:1px solid var(--warn);border-radius:8px;padding:14px;margin-bottom:14px}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:none;align-items:center;justify-content:center;z-index:9;padding:16px}
-.modal .box{background:var(--panel);border:2px solid var(--gold);border-radius:12px;padding:26px;max-width:620px;width:100%}
-.modal h3{margin:0 0 12px;color:var(--gold);font:700 18px Georgia,serif;letter-spacing:1px}
-.proj{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px dashed #2c2820}
-.pill{font-size:12px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--muted)}
-.pill.done{color:var(--ok);border-color:var(--ok)} .pill.failed{color:#e57373;border-color:#e57373} .pill.running{color:var(--gold);border-color:var(--gold)}
-.ready{font:800 40px Georgia,serif;color:var(--gold);text-align:center;letter-spacing:6px;margin:8px 0}
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e8b64c'/%3E%3Ctext x='32' y='46' font-size='40' text-anchor='middle' font-family='Georgia' fill='%231a1305'%3EИ%3C/text%3E%3C/svg%3E">
+<link rel="preload" href="/static/fonts/inter-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/playfair-display-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/fonts.css">
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <h1>ИСТОРИК VIDEO FACTORY</h1>
-  <span class="sub" id="sub">автономное производство исторических видео</span>
+<a class="skip" href="#main">Перейти к содержимому</a>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="vignette" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="top">
+  <a class="brand" href="#/" aria-label="ИСТОРИК VIDEO FACTORY — на главную">
+    <span class="brand-mark" aria-hidden="true">И</span>
+    <span class="brand-name">ИСТОРИК VIDEO FACTORY<small id="channelLine">автономное производство видео</small></span>
+  </a>
+  <div class="top-spacer"></div>
+  <div class="top-actions">
+    <button class="badge pill-btn" id="keysPill" type="button" aria-label="Ключи Gemini">Ключи…</button>
+    <button class="btn btn-sm" id="healthBtn" type="button" aria-label="Проверить систему">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      <span class="btn-label">Проверить систему</span>
+    </button>
+  </div>
 </header>
 
-<div class="modal" id="modal"><div class="box">
-  <h3 id="mTitle">ТРЕБУЕТСЯ ДЕЙСТВИЕ ПОЛЬЗОВАТЕЛЯ</h3>
-  <p id="mMsg"></p>
-  <p id="mUrl" class="muted"></p>
-  <div class="row"><button onclick="api('/api/continue',{method:'POST'})">Продолжить</button>
-  <button class="danger" onclick="stopRun()">Остановить</button></div>
-</div></div>
-
-<main>
-  <div>
-    <div class="banner" id="keys" style="display:none">
-      <b>Первый запуск: нужен API-ключ Google AI Studio</b>
-      <p class="muted">Ключ сохраняется локально в файле .env (не попадает в Git и в код). Получить: aistudio.google.com/apikey</p>
-      <div class="row"><input id="kG" type="password" placeholder="Google AI Studio API key" style="flex:1;min-width:240px">
-      <input id="kY" type="password" placeholder="YouTube Data API key (необязательно)" style="flex:1;min-width:240px">
-      <button onclick="saveKeys()">Сохранить</button></div>
-    </div>
-
-    <section>
-      <div class="row" style="justify-content:space-between"><h2>Актуальные темы</h2>
-        <div class="row"><span class="muted" id="tState"></span><button class="ghost" onclick="refreshTopics()">Обновить темы</button></div></div>
-      <div class="row" style="margin-bottom:6px">
-        <label class="muted">Длительность, мин <input id="minutes" type="number" min="3" max="60" style="width:80px"></label>
-        <label class="muted">Кадры <select id="backend"><option value="flow">Google Flow</option><option value="gemini_api">Gemini API (Imagen)</option></select></label>
-      </div>
-      <div class="row" style="margin:10px 0"><input id="custom" placeholder="…или своя тема: например, «Вся история Казахского ханства»" style="flex:1">
-        <button class="ghost" onclick="startCustom()">Начать со своей темой</button></div>
-      <div id="topics"><p class="muted">Загрузка…</p></div>
-    </section>
-  </div>
-
-  <div>
-    <section>
-      <h2>Производство</h2>
-      <div id="noRun" class="muted">Выберите тему — дальше всё произойдёт автоматически.</div>
-      <div id="run" style="display:none">
-        <div class="muted">Тема</div><div id="rTitle" style="font:600 18px Georgia,serif;margin-bottom:10px"></div>
-        <div id="stages"></div>
-        <div class="op"><span class="muted">Текущая операция:</span><br><span id="op"></span></div>
-        <div id="ready"></div>
-        <div class="row" style="margin-bottom:10px">
-          <button class="danger" id="bStop" onclick="stopRun()">Остановить</button>
-          <button class="ghost" id="bResume" onclick="resume(cur)">Продолжить проект</button>
-          <button class="ghost" onclick="openFolder(cur,'')">Папка проекта</button>
-          <a id="ccLink" target="_blank" style="color:var(--gold);display:none">Открыть в ChatCut</a>
-        </div>
-        <div class="log" id="log"></div>
-      </div>
-    </section>
-    <section style="margin-top:20px">
-      <h2>Проекты</h2>
-      <div id="projects" class="muted">—</div>
-    </section>
-  </div>
+<main id="main" class="wrap" tabindex="-1">
+  <div id="view"></div>
 </main>
 
-<script>
-let cur = null, stages = [], lastState = null;
-const $ = id => document.getElementById(id);
-async function api(url, opt) {
-  const r = await fetch(url, opt);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert(j.detail || ('Ошибка ' + r.status)); throw new Error(j.detail); }
-  return j;
-}
-const post = (url, body) => api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+<canvas id="confetti" aria-hidden="true"></canvas>
 
-async function saveKeys() {
-  await post('/api/keys', {GEMINI_API_KEY: $('kG').value, YOUTUBE_API_KEY: $('kY').value});
-  $('kG').value = $('kY').value = ''; tick(); refreshTopics();
-}
-async function refreshTopics() { await post('/api/topics/refresh'); loadTopics(); }
-async function loadTopics() {
-  const t = await api('/api/topics');
-  $('tState').textContent = t.status.running ? ('Идёт поиск: ' + t.status.stage + '…') :
-    (t.status.error ? 'Ошибка: ' + t.status.error : (t.updated_at ? 'Обновлено ' + t.updated_at.replace('T', ' ') : ''));
-  if (!t.topics.length) { $('topics').innerHTML = '<p class="muted">' + (t.status.running ? 'Анализирую YouTube, конкурентов и поиск Google…' : 'Нажмите «Обновить темы».') + '</p>'; return; }
-  $('topics').innerHTML = t.topics.map((x, i) => `
-    <div class="topic"><span class="score">${x.score ?? ''}</span>
-      <div class="lbl">Тема [${i + 1}]</div><h3>${esc(x.title)}</h3>
-      <div class="lbl">Почему тема интересна</div><div>${esc(x.why_interesting)}</div>
-      <div class="lbl">Период</div><div>${esc(x.period)}</div>
-      <div class="lbl">Основные события</div><ul>${(x.key_events || []).map(e => '<li>' + esc(e) + '</li>').join('')}</ul>
-      <div class="lbl">Источники</div><ul>${(x.sources || []).map(s => `<li><a href="${esc(s.url)}" target="_blank">${esc(s.title || s.url)}</a></li>`).join('') || '<li class="muted">—</li>'}</ul>
-      <div class="lbl">Похожие видео конкурентов</div><ul>${(x.competitor_videos || []).map(v => `<li>${v.url ? `<a href="${esc(v.url)}" target="_blank">${esc(v.title)}</a>` : esc(v.title)} <span class="muted">${esc(v.channel || '')} ${v.views ? '· ' + Number(v.views).toLocaleString('ru') + ' просм.' : ''}</span></li>`).join('') || '<li class="muted">—</li>'}</ul>
-      <div class="lbl">Почему подходит каналу</div><div>${esc(x.fit)} ${x.angle ? '<br><i>Угол: ' + esc(x.angle) + '</i>' : ''}</div>
-      <div class="row" style="margin-top:12px"><button onclick="startTopic('${x.id}', ${x.suggested_minutes || 'null'})">ВЫБРАТЬ ТЕМУ</button>
-      <span class="muted">${x.suggested_minutes ? 'рекомендуемая длительность ' + x.suggested_minutes + ' мин' : ''}</span></div>
-    </div>`).join('');
-}
-async function startTopic(id, sugg) {
-  const minutes = +$('minutes').value || sugg || null;
-  const r = await post('/api/start', {topic_id: id, target_minutes: minutes, image_backend: $('backend').value});
-  cur = r.id; tick();
-}
-async function startCustom() {
-  const title = $('custom').value.trim(); if (!title) return;
-  const r = await post('/api/start', {custom_title: title, target_minutes: +$('minutes').value || null, image_backend: $('backend').value});
-  cur = r.id; $('custom').value = ''; tick();
-}
-async function resume(id, from) { await api('/api/projects/' + id + '/resume' + (from ? '?from_stage=' + from : ''), {method:'POST'}); cur = id; tick(); }
-async function stopRun() { if (confirm('Остановить производство? Прогресс сохранится, можно будет продолжить.')) await api('/api/stop', {method:'POST'}); }
-async function openFolder(id, sub) { await api('/api/open/' + id + '?sub=' + encodeURIComponent(sub), {method:'POST'}); }
+<dialog id="dlgKeys" aria-labelledby="dlgKeysTitle">
+  <form method="dialog" class="dlg-body" id="keysForm">
+    <h2 id="dlgKeysTitle">Ключи Google AI Studio</h2>
+    <p class="muted">Вставьте один или сразу несколько ключей — через запятую, пробел или с новой строки. Программа сама отбросит лишний текст
+      и будет использовать ключи по кругу: если у ключа кончилась квота, сразу берётся следующий. Ключи хранятся только у вас, в файле <code translate="no">.env</code>.</p>
+    <div id="keysSummary" class="row"></div>
+    <ul class="keys-list" id="keysList" aria-label="Список ключей"></ul>
+    <div class="field">
+      <label for="keysText">Новые ключи</label>
+      <textarea id="keysText" name="keys" autocomplete="off" spellcheck="false" placeholder="AIza… или AQ.…, по одному в строке…"></textarea>
+    </div>
+    <label class="row" style="gap:8px"><input type="checkbox" id="keysReplace" name="replace"> Заменить все текущие ключи</label>
+    <div class="field">
+      <label for="ytKey">YouTube Data API key (необязательно)</label>
+      <input id="ytKey" name="youtube_key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…">
+    </div>
+  </form>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Закрыть</button>
+    <button class="btn" type="button" id="keysRemoveBad">Удалить неверные</button>
+    <button class="btn" type="button" id="keysCheck">Проверить ключи</button>
+    <button class="btn btn-primary" type="button" id="keysSave">Сохранить ключи</button>
+  </div>
+</dialog>
 
-function renderProject(p, busy) {
-  $('noRun').style.display = 'none'; $('run').style.display = '';
-  $('rTitle').textContent = p.title;
-  $('stages').innerHTML = stages.map(([k, label]) => {
-    const s = p.stages[k] || {}; const st = s.status || 'pending';
-    const pr = s.progress; const pct = st === 'done' ? 100 : (pr && pr.total ? Math.round(100 * pr.done / pr.total) : 0);
-    const mark = st === 'done' ? '✓' : st === 'failed' ? '✗' : st === 'running' ? '▶' : ' ';
-    const cnt = pr && pr.total > 1 && st !== 'pending' ? ` ${pr.done}/${pr.total}` : '';
-    return `<div class="stage ${st}"><span class="mark">[${mark}]</span><span class="name">${label}${cnt}</span>
-      <div class="bar"><div style="width:${pct}%"></div></div></div>`;
-  }).join('');
-  $('op').textContent = p.current_operation || (p.status === 'running' ? '…' : p.status);
-  $('log').textContent = (p.log_tail || []).join('\n'); $('log').scrollTop = 1e9;
-  const running = busy && ['running', 'waiting_user'].includes(p.status);
-  $('bStop').style.display = running ? '' : 'none';
-  $('bResume').style.display = !running && p.status !== 'done' ? '' : 'none';
-  const cc = (p.chatcut || {}).editor_url;
-  $('ccLink').style.display = cc ? '' : 'none'; if (cc) $('ccLink').href = cc;
-  $('ready').innerHTML = p.status === 'done' ? `<div class="ready">ГОТОВО</div><div class="report">${esc((p.result || {}).report || '')}</div>` :
-    (p.status === 'failed' ? `<div class="op" style="border-color:#e57373">Ошибка: ${esc((p.errors || []).slice(-1)[0]?.text || '')}<br>Нажмите «Продолжить проект» — работа продолжится с последнего завершённого шага.</div>` : '');
-  const ua = p.user_action;
-  if (ua && p.status === 'waiting_user') {
-    $('modal').style.display = 'flex'; $('mTitle').textContent = ua.title || 'ТРЕБУЕТСЯ ДЕЙСТВИЕ ПОЛЬЗОВАТЕЛЯ';
-    $('mMsg').textContent = ua.message; $('mUrl').innerHTML = ua.url ? `Если окно не открылось: <a href="${esc(ua.url)}" target="_blank" style="color:var(--gold)">ссылка для входа</a>` : '';
-  } else $('modal').style.display = 'none';
-}
+<dialog id="dlgStart" aria-labelledby="dlgStartTitle">
+  <div class="dlg-body">
+    <h2 id="dlgStartTitle">Начать производство</h2>
+    <div class="field">
+      <label for="startTitle">Название ролика</label>
+      <input id="startTitle" name="title" autocomplete="off" spellcheck="true">
+      <div class="suggest" id="startSuggest"></div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      <div class="field"><label for="startMinutes">Длительность</label>
+        <select id="startMinutes" name="minutes">
+          <option value="1">1 мин — тест</option><option value="3">3 мин</option><option value="5">5 мин</option><option value="8">8 мин</option>
+          <option value="10">10 мин</option><option value="15">15 мин</option><option value="20">20 мин</option><option value="30">30 мин</option>
+        </select></div>
+      <div class="field"><label for="startBackend">Кадры</label>
+        <select id="startBackend" name="backend">
+          <option value="gemini_api">Gemini API — быстро, параллельно</option>
+          <option value="flow">Google Flow — в браузере, по одному</option>
+        </select></div>
+    </div>
+    <p class="hint" id="startEstimate"></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Отмена</button>
+    <button class="btn btn-primary" type="button" id="startGo">Начать производство</button>
+  </div>
+</dialog>
 
-async function tick() {
-  try {
-    const s = await api('/api/state'); lastState = s; stages = s.stages;
-    $('keys').style.display = s.missing_secrets.length ? '' : 'none';
-    if (!$('minutes').value) $('minutes').placeholder = s.defaults.target_minutes;
-    $('sub').textContent = 'канал «' + (s.channel || 'ИСТОРИК') + '»' + (s.mock ? ' · ТЕСТОВЫЙ РЕЖИМ' : '');
-    if (s.current) { cur = s.current.id; renderProject(s.current, s.busy); }
-    else if (cur) renderProject(await api('/api/projects/' + cur), false);
-    const ps = await api('/api/projects');
-    $('projects').innerHTML = ps.length ? ps.map(p => `<div class="proj"><div><div>${esc(p.title)}</div><div class="muted">${esc(p.id)}</div></div>
-      <div class="row"><span class="pill ${p.status}">${{done:'ГОТОВО',failed:'ошибка',running:'в работе',waiting_user:'ждёт вас',stopped:'остановлен',created:'создан'}[p.status] || p.status}</span>
-      <button class="ghost" onclick="cur='${p.id}';tick()">Открыть</button>
-      ${p.status !== 'done' && !(s.busy) ? `<button onclick="resume('${p.id}')">Продолжить</button>` : ''}</div></div>`).join('') : 'Пока нет проектов.';
-  } catch (e) { console.error(e); }
-}
-setDefaults();
-function setDefaults() { api('/api/state').then(s => { $('backend').value = s.defaults.image_backend; }); }
-tick(); loadTopics();
-setInterval(tick, 1500);
-setInterval(() => { if (lastState && !lastState.busy) loadTopics(); }, 5000);
-</script>
+<dialog id="dlgAction" aria-labelledby="dlgActionTitle">
+  <div class="dlg-body">
+    <h2 id="dlgActionTitle">Требуется действие</h2>
+    <p id="dlgActionMsg"></p>
+    <p id="dlgActionUrl" class="hint"></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-danger" type="button" id="actionStop">Остановить</button>
+    <button class="btn btn-primary" type="button" id="actionContinue" autofocus>Продолжить</button>
+  </div>
+</dialog>
+
+<dialog id="dlgConfirm" aria-labelledby="dlgConfirmTitle">
+  <div class="dlg-body"><h2 id="dlgConfirmTitle">Подтверждение</h2><p id="dlgConfirmMsg"></p></div>
+  <div class="dlg-foot">
+    <button class="btn btn-ghost" type="button" data-close>Отмена</button>
+    <button class="btn btn-danger" type="button" id="confirmGo">Подтвердить</button>
+  </div>
+</dialog>
+
+<script src="/static/app.js" defer></script>
 </body>
 </html>

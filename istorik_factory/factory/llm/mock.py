@@ -1,16 +1,51 @@
-"""Офлайн-заглушка Gemini (FACTORY_MOCK=1): детерминированные ответы для сквозного теста конвейера без сети и ключей."""
+"""Офлайн-заглушка Gemini (FACTORY_MOCK=1): детерминированные ответы для сквозного теста конвейера без сети и ключей.
+FACTORY_MOCK_DELAY=<сек> добавляет задержку к каждому вызову (для проверки панели «в работе»)."""
 from __future__ import annotations
 
+import os
 import re
+import threading
+
+from ..core.errors import CANCEL, StopRequested
+
+
+def _delay() -> None:
+    d = float(os.environ.get("FACTORY_MOCK_DELAY", "0") or 0)
+    if d and CANCEL.wait(d):
+        raise StopRequested()
+
+
+class _Pool:
+    def alive(self) -> int:
+        return 4
+
+    def summary(self) -> dict:
+        return {"total": 4, "ok": 4, "unknown": 0, "quota": 0, "invalid": 0, "text": "4 ключа: 4 ✓ (тестовый режим)",
+                "keys": [], "next_reset": None}
+
+    def __len__(self) -> int:
+        return 4
 
 
 class MockGemini:
-    last_grounding: dict = {}
+    def __init__(self):
+        self.pool = _Pool()
+        self._local = threading.local()
 
     def sources(self) -> list[dict]:
         return [{"title": "Mock source", "url": "https://example.org/source"}]
 
-    def generate(self, prompt: str, system=None, search=False, temperature=None, json_mode=False, fast=False, max_tokens=0) -> str:
+    def check_keys(self) -> dict:
+        return self.pool.summary()
+
+    def reload_keys(self) -> None:
+        pass
+
+    def generate_ex(self, prompt: str, system=None, search=False, temperature=None, tier="flash", thinking="low", **kw):
+        return self.generate(prompt), self.sources()
+
+    def generate(self, prompt: str, system=None, search=False, temperature=None, fast=True, **kw) -> str:
+        _delay()
         if "Напиши текст главы" in prompt:
             n = int(re.search(r"Объём: около (\d+)", prompt).group(1))
             num = int(re.search(r"главы (\d+)", prompt).group(1))
@@ -23,16 +58,23 @@ class MockGemini:
             ]
             out, k = [], 0
             while sum(len(s.split()) for s in out) < n:
-                out.append(base[k % len(base)].replace("беда", f"беда номер {k + 1}") if k >= len(base) else base[k])
+                out.append(base[k % len(base)].rstrip(".") + f", эпизод {k + 1}." if k >= len(base) else base[k])
                 k += 1
             return " ".join(out)
         return "Заметки исследования (офлайн-тест): хронология, персонажи, спорные моменты."
 
-    def generate_json(self, prompt: str, system=None, search=False, fast=False, temperature=None, retries=2):
+    def generate_json(self, prompt: str, system=None, search=False, fast=True, temperature=None, **kw):
+        _delay()
         if "контент-стратег" in prompt:
-            return [{"title": f"Тестовая тема {i}", "why_interesting": "тест", "period": "XVIII век",
-                     "key_events": ["событие 1", "событие 2"], "sources": [], "competitor_videos": [], "fit": "тест",
-                     "angle": "тест", "suggested_minutes": 3, "score": 90 - i} for i in range(1, 6)]
+            return [{"title": f"Тестовая тема {i}", "why_interesting": "Годовщина события и рост интереса к теме в поиске.",
+                     "period": "XVIII век", "key_events": ["Начало войны", "Решающая битва", "Мирный договор"],
+                     "sources": [{"title": "Энциклопедия", "url": "https://example.org/enc"}],
+                     "competitor_videos": [{"title": "Похожий ролик", "channel": "Канал", "views": 120000,
+                                            "url": "https://youtube.com/watch?v=x"}],
+                     "fit": "Ядро аудитории канала.", "angle": "Взгляд из степи.", "suggested_minutes": 1, "score": 90 - i}
+                    for i in range(1, 7)]
+        if "Название исторического YouTube-ролика ввёл пользователь" in prompt:
+            return {"title": "Вся история России", "alternatives": ["Россия: полная история"], "changed": True}
         if "структурированную справку" in prompt:
             return {"title": "Тест", "period": "1700–1760", "summary": "Кратко.",
                     "chronology": [{"date": str(1700 + i * 10), "event": f"Событие {i}", "place": "степь", "certainty": "high"} for i in range(5)],
@@ -41,10 +83,12 @@ class MockGemini:
                     "peoples": [{"name": "казахи", "appearance": "халаты"}], "myths": [], "key_numbers": []}
         if "Составь план документального ролика" in prompt:
             total = int(re.search(r"≈ (\d+) слов", prompt).group(1))
-            return {"title": "Тест", "title_reveal": {"small": "ВСЯ ИСТОРИЯ", "title": "ТЕСТОВОЕ ХАНСТВО", "sub": "И ЕГО ВОЙНЫ"},
+            return {"title_reveal": {"small": "ВСЯ ИСТОРИЯ", "title": "ТЕСТОВОЕ ХАНСТВО", "sub": "И ЕГО ВОЙНЫ"},
                     "chapters": [{"number": i, "title": "Вступление" if i == 0 else f"Глава {i}", "summary": f"часть {i}",
                                   "key_points": [], "target_words": total // 4} for i in range(4)]}
-        if "Для каждого предложения определи" in prompt:
+        if "главный редактор" in prompt:
+            return {"fixes": []}
+        if "Для каждого определи, что должно быть на экране" in prompt:
             ids = [int(x) for x in re.findall(r"^\[(\d+)\]", prompt, re.M)]
             return [{"sentence_id": i, "visual_description": "степь", "characters": [], "dates": [], "location": "степь",
                      "mood": "tense" if i % 5 == 0 else "calm", "emphasis": 3 if i % 11 == 0 else 1} for i in ids]
@@ -67,3 +111,7 @@ class MockGemini:
 
     def image_matches(self, image: bytes, text: str, mime: str = "image/png") -> dict:
         return {"score": 8, "has_text": False, "comment": "mock"}
+
+    def last_model(self) -> str:
+        return "mock"
+

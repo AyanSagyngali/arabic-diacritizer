@@ -68,6 +68,11 @@ class FlowBackend:
             flow_state["project_url"] = self.page.url
             p.save()
         self._ensure_image_mode()
+        try:
+            from ..health import save_flow_login
+            save_flow_login(True)
+        except Exception:
+            pass
         if not self._prompt_box():
             self.ctx.require_user(
                 "Не удалось найти поле ввода промта во Flow (интерфейс мог измениться). В окне браузера откройте проект Flow "

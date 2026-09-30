@@ -110,3 +110,13 @@ def synth_speech_like(seconds: float, rate: int, seed: int = 0) -> np.ndarray:
     sig = (tone + noise) * env
     pad = np.zeros(int(0.15 * rate), dtype=np.float32)
     return np.concatenate([pad, sig.astype(np.float32), pad])
+
+
+def peaks(a: np.ndarray, n: int = 600) -> list[float]:
+    """Огибающая для отрисовки волны в панели (0..1)."""
+    if len(a) == 0:
+        return []
+    step = max(1, len(a) // n)
+    m = np.abs(a[: step * (len(a) // step)]).reshape(-1, step).max(axis=1)
+    top = float(m.max() or 1.0)
+    return [round(float(x) / top, 3) for x in m[:n]]

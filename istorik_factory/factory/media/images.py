@@ -57,3 +57,19 @@ def placeholder(text: str, path: Path, size=(1376, 768), seed: int = 0) -> str:
     d.rectangle([60, 60, size[0] - 60, size[1] - 60], outline=(212, 175, 55), width=6)
     d.text((100, 100), text[:80], fill=(255, 255, 255))
     return save_png(im, path)
+
+
+def thumbnail(path: Path, width: int = 384) -> Path:
+    """Миниатюра для панели: <папка>/.thumbs/<имя>.jpg (создаётся один раз)."""
+    path = Path(path)
+    out = path.parent / ".thumbs" / (path.stem + ".jpg")
+    if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        im.thumbnail((width, width * 2))
+        tmp = out.with_suffix(".tmp")
+        im.save(tmp, "JPEG", quality=78, optimize=True)
+        tmp.replace(out)
+    return out

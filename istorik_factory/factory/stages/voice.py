@@ -2,9 +2,15 @@
 проверка каждой части, склейка в master_voice.wav, нормализация громкости и таймкоды."""
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from ..config import mock_mode
+from ..core import events
+from ..core.errors import AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested
+from ..core.errors import sleep as err_sleep
+from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
 from ..core.text import speech_weight, words
 from ..media import audio as A
@@ -77,51 +83,67 @@ def run(ctx) -> None:
     ctx.log.log(f"Voice: {len(chunks)} chunks, speaker={vc['speaker']}, style={vc['style']}", "voice")
 
     state = read_json(vdir / "voice_state.json", {}) or {}
+    lock = threading.Lock()
     direction = f"{vc['direction'].strip()} Стиль: {vc['style']}. Прочитай вслух следующий текст:"
-
     tts = None
     if not mock_mode():
         from ..llm.gemini import llm
         tts = llm()
 
-    for i, c in enumerate(chunks):
-        ctx.check_stop()
-        path = vdir / c["file"]
-        ok, reason, d = check_chunk(path, c["text"], wpm)
+    todo = []
+    for c in chunks:  # уже готовые части (после перезапуска) проверяются, а не генерируются заново
+        ok, _, d = check_chunk(vdir / c["file"], c["text"], wpm)
         if ok:
             state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3)}
-            continue
-        last = reason
-        for attempt in range(int(vc.get("retries", 4)) + 1):
-            ctx.check_stop()
-            p.progress("voice", i, len(chunks), f"Озвучка: часть {i + 1} из {len(chunks)}" + (f" (повтор {attempt})" if attempt else ""))
+        else:
+            todo.append(c)
+    write_json(vdir / "voice_state.json", state)
+
+    def done_n() -> int:
+        return sum(1 for c in chunks if state.get(c["chunk_id"], {}).get("status") == "done")
+
+    def one(c):
+        path = vdir / c["file"]
+        last = ""
+        for attempt in range(int(vc.get("retries", 3)) + 1):
             try:
                 if mock_mode():
+                    from ..llm.mock import _delay
+                    _delay()
                     rate = int(vc["sample_rate"])
-                    sig = A.synth_speech_like(expected_seconds(c["text"], wpm), rate, seed=i)
-                    A.write_wav(path, sig, rate)
+                    A.write_wav(path, A.synth_speech_like(expected_seconds(c["text"], wpm), rate, seed=int(c["chunk_id"])), rate)
                 else:
                     pcm, rate = tts.tts(c["text"], vc["speaker"], direction)
                     A.pcm_to_wav(pcm, path, rate)
                 ok, last, d = check_chunk(path, c["text"], wpm)
                 if ok:
-                    break
+                    return d
                 ctx.log.warn(f"Voice chunk {c['chunk_id']} rejected: {last}", "voice")
+            except (StopRequested, AllKeysExhausted, NoValidKeys, RegionBlocked):
+                raise
             except Exception as e:
-                if type(e).__name__ == "StopRequested":
-                    raise
                 last = f"{type(e).__name__}: {e}"
                 ctx.log.warn(f"Voice chunk {c['chunk_id']} error: {last}", "voice")
-                ctx.sleep(min(60, 5 * (attempt + 1)))
-        if not ok:
+                err_sleep(min(8, 2 * (attempt + 1)))
+        with lock:
             state[c["chunk_id"]] = {"status": "failed", "error": last}
             write_json(vdir / "voice_state.json", state)
-            raise RuntimeError(f"часть озвучки {c['file']} не получена: {last}")
-        state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3)}
-        write_json(vdir / "voice_state.json", state)
-        ctx.log.log(f"Voice chunk {c['file']} ✓ {d:.1f}s", "voice")
+        raise RuntimeError(f"часть озвучки {c['file']} не получена: {last}")
 
-    p.progress("voice", len(chunks), len(chunks), "Склейка озвучки в master_voice.wav")
+    def saved(c, d):
+        with lock:
+            state[c["chunk_id"]] = {"status": "done", "duration": round(d, 3)}
+            write_json(vdir / "voice_state.json", state)
+            k = done_n()
+        ctx.log.log(f"Voice chunk {c['file']} ✓ {d:.1f}s", "voice")
+        events.publish("voice", {"project": p.data["id"], "chunk": c["chunk_id"]})
+        p.progress("voice", k, len(chunks), f"Озвучиваю части: {k}/{len(chunks)} готово…")
+
+    if todo:
+        p.progress("voice", done_n(), len(chunks), f"Озвучиваю части: {done_n()}/{len(chunks)} готово…")
+        parallel_map(one, todo, workers("voice", 4), on_result=saved, check=ctx.check_stop)
+
+    p.progress("voice", len(chunks), len(chunks), "Склеиваю озвучку в master_voice.wav и выравниваю громкость…")
     merge(ctx, chunks, frames)
 
 
@@ -191,6 +213,7 @@ def merge(ctx, chunks: list[dict], frames: list[dict]) -> None:
         "master": "master_voice.wav", "sample_rate": rate, "duration": round(total, 3),
         "loudness_lufs": round(after, 2), "chunks": timeline, "frames": out_frames, "segments": seg_times,
     })
+    write_json(vdir / "waveform.json", {"duration": round(total, 3), "peaks": A.peaks(master, 600)})
     p.data["result"]["voice_duration"] = round(total, 2)
     p.data["result"]["voice_chunks"] = len(chunks)
     p.save()

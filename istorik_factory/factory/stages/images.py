@@ -1,15 +1,26 @@
-"""ЭТАП 4 — ГЕНЕРАЦИЯ КАДРОВ: 001.png, 002.png, … строго по порядку; сбойные кадры → NNN_FAILED, повтор в конце."""
+"""ЭТАП 4 — ГЕНЕРАЦИЯ КАДРОВ: 001.png, 002.png, … строго по номерам.
+
+Gemini API — параллельно (turbo.image_workers), Google Flow — по одному (браузер). Каждый готовый кадр сразу
+сохраняется и отмечается в images_state.json; сбойный → NNN_FAILED, повтор сразу и в конце этапа.
+"""
 from __future__ import annotations
 
 import hashlib
+import threading
 
 from ..config import mock_mode
+from ..core import events
+from ..core.errors import AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested
+from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
-from ..media.images import inspect_bytes, placeholder, save_png, validate_file
+from ..media.images import inspect_bytes, placeholder, save_png, thumbnail, validate_file
+
+FATAL = (AllKeysExhausted, NoValidKeys, RegionBlocked, StopRequested)
 
 
 class GeminiImageBackend:
     name = "gemini_api"
+    parallel = True
 
     def __init__(self, ctx):
         from ..llm.gemini import llm
@@ -21,17 +32,19 @@ class GeminiImageBackend:
         pass
 
     def generate(self, frame: dict) -> bytes:
-        prompt = frame["prompt"] + (f". Avoid: {self.negative}" if self.negative else "")
-        return self.g.image(prompt, self.aspect)
+        return self.g.image(frame["prompt"] + (f". Avoid: {self.negative}" if self.negative else ""), self.aspect)
 
 
 class MockBackend:
     name = "mock"
+    parallel = True
 
     def setup(self) -> None:
         pass
 
     def generate(self, frame: dict) -> bytes:
+        from ..llm.mock import _delay
+        _delay()
         import tempfile
         from pathlib import Path
         tmp = Path(tempfile.mkdtemp()) / "x.png"
@@ -44,7 +57,9 @@ def make_backend(name: str, ctx):
         return MockBackend()
     if name == "flow":
         from ..flow.generator import FlowBackend
-        return FlowBackend(ctx)
+        b = FlowBackend(ctx)
+        b.parallel = False
+        return b
     if name == "gemini_api":
         return GeminiImageBackend(ctx)
     raise ValueError(f"неизвестный генератор изображений: {name}")
@@ -58,13 +73,11 @@ def run(ctx) -> None:
     total = len(frames)
     state_path = idir / "images_state.json"
     state = read_json(state_path, {}) or {}
-    min_w = int(cfg.at("images.min_width", 1000))
-    if mock_mode():
-        min_w = 800
+    min_w = 800 if mock_mode() else int(cfg.at("images.min_width", 1000))
+    lock = threading.Lock()
 
-    # уже готовые файлы (после перезапуска) подтверждаются проверкой
-    hashes = {}
-    for f in frames:
+    hashes: dict[str, str] = {}
+    for f in frames:  # готовые файлы (после перезапуска) подтверждаются проверкой
         fid = f["frame_id"]
         png = idir / f"{fid}.png"
         if png.exists():
@@ -78,84 +91,95 @@ def run(ctx) -> None:
             state[fid]["status"] = "pending"
     write_json(state_path, state)
 
-    primary = p.data.get("image_backend") or cfg.at("images.backend", "flow")
+    primary = p.data.get("image_backend") or cfg.at("images.backend", "gemini_api")
     fallback = cfg.at("images.fallback_backend") or None
-    backend = make_backend(primary, ctx)
+    holder = {"backend": make_backend(primary, ctx), "fails": 0}
     try:
-        backend.setup()
+        holder["backend"].setup()
+    except FATAL:
+        raise
     except Exception as e:
-        if fallback and fallback != primary and "StopRequested" not in type(e).__name__:
-            ctx.log.error(f"Image backend '{primary}' setup failed, switching to '{fallback}'", "flow", exc=e)
-            backend = make_backend(fallback, ctx)
-            backend.setup()
-            p.update(image_backend=fallback)
-        else:
+        if not fallback or fallback == primary:
             raise
-
+        ctx.log.error(f"Image backend '{primary}' setup failed, switching to '{fallback}'", "flow", exc=e)
+        holder["backend"] = make_backend(fallback, ctx)
+        holder["backend"].setup()
+        p.update(image_backend=fallback)
     retries = int(cfg.at("images.retries_per_frame", 2))
-    consecutive_fail = 0
 
     def done_count() -> int:
         return sum(1 for f in frames if state.get(f["frame_id"], {}).get("status") == "done")
 
+    def report(text: str) -> None:
+        p.progress("images", done_count(), total, text)
+
     def attempt(frame: dict) -> bool:
-        nonlocal backend, consecutive_fail
         fid = frame["frame_id"]
-        st = state.setdefault(fid, {"status": "pending", "attempts": 0})
         for _ in range(retries + 1):
             ctx.check_stop()
-            st["attempts"] = st.get("attempts", 0) + 1
-            p.progress("images", done_count(), total, f"Генерация кадра {fid} из {total:03d} ({backend.name})")
+            backend = holder["backend"]
+            with lock:
+                st = state.setdefault(fid, {"status": "pending", "attempts": 0})
+                st["attempts"] = st.get("attempts", 0) + 1
             try:
                 data = backend.generate(frame)
                 ok, reason, im = inspect_bytes(data, min_w)
                 if not ok:
                     raise ValueError(reason)
                 digest = hashlib.sha1(data).hexdigest()
-                if digest in hashes and hashes[digest] != fid:
-                    raise ValueError(f"изображение совпадает с кадром {hashes[digest]} — отклонено")
-                sha = save_png(im, idir / f"{fid}.png")
-                hashes[digest] = fid
-                hashes[sha] = fid
+                with lock:
+                    if digest in hashes and hashes[digest] != fid:
+                        raise ValueError(f"изображение совпадает с кадром {hashes[digest]} — отклонено")
+                    hashes[digest] = fid
+                save_png(im, idir / f"{fid}.png")
+                thumbnail(idir / f"{fid}.png")
                 (idir / f"{fid}_FAILED").unlink(missing_ok=True)
-                st.update(status="done", backend=backend.name, error=None, size=f"{im.width}x{im.height}")
-                write_json(state_path, state)
+                with lock:
+                    st.update(status="done", backend=backend.name, error=None, size=f"{im.width}x{im.height}")
+                    write_json(state_path, state)
+                    holder["fails"] = 0
                 ctx.log.log(f"Frame {fid} ✓ ({backend.name})", "flow")
-                consecutive_fail = 0
+                events.publish("frame", {"project": p.data["id"], "frame_id": fid})
+                report(f"Генерирую кадры: {done_count()}/{total} готово…")
                 return True
+            except FATAL:
+                raise
             except Exception as e:
-                if type(e).__name__ == "StopRequested":
-                    raise
-                st.update(status="failed", error=f"{type(e).__name__}: {e}")
-                write_json(state_path, state)
+                with lock:
+                    st.update(status="failed", error=f"{type(e).__name__}: {e}")
+                    write_json(state_path, state)
+                    holder["fails"] += 1
+                    switch = holder["fails"] >= 6 and fallback and backend.name not in (fallback, "mock")
                 (idir / f"{fid}_FAILED").write_text(st["error"], encoding="utf-8")
                 ctx.log.warn(f"Frame {fid} ERROR: {e}", "flow")
-                consecutive_fail += 1
-                if consecutive_fail >= 6 and fallback and backend.name != fallback and backend.name != "mock":
-                    ctx.log.warn(f"{consecutive_fail} ошибок подряд в '{backend.name}' — переключаюсь на '{fallback}'", "flow")
-                    backend = make_backend(fallback, ctx)
-                    backend.setup()
-                    p.update(image_backend=fallback)
-                    consecutive_fail = 0
+                if switch:
+                    with lock:
+                        if holder["backend"] is backend:
+                            ctx.log.warn(f"6 ошибок подряд в '{backend.name}' — переключаюсь на '{fallback}'", "flow")
+                            nb = make_backend(fallback, ctx)
+                            nb.setup()
+                            holder["backend"], holder["fails"] = nb, 0
+                            p.update(image_backend=fallback)
         return False
 
-    for f in frames:
-        if state.get(f["frame_id"], {}).get("status") != "done":
-            attempt(f)
+    def run_round(todo: list[dict]) -> None:
+        backend = holder["backend"]
+        n = workers("image", 6) if getattr(backend, "parallel", True) else 1
+        report(f"Генерирую кадры: {done_count()}/{total} готово ({n} потоков)…")
+        parallel_map(attempt, todo, n, check=ctx.check_stop)
 
+    run_round([f for f in frames if state.get(f["frame_id"], {}).get("status") != "done"])
     for rnd in range(int(cfg.at("images.final_retry_rounds", 2))):
         failed = [f for f in frames if state.get(f["frame_id"], {}).get("status") != "done"]
         if not failed:
             break
         ctx.log.log(f"Retry round {rnd + 1}: {len(failed)} failed frames", "flow")
-        for f in failed:
-            attempt(f)
+        run_round(failed)
 
     failed = [f["frame_id"] for f in frames if state.get(f["frame_id"], {}).get("status") != "done"]
-    p.progress("images", done_count(), total, f"Кадры: {done_count()}/{total}")
+    report(f"Кадры: {done_count()}/{total}")
     if failed:
-        raise RuntimeError(f"не удалось создать кадры: {', '.join(failed)} (подробности в 08_logs/flow.log)")
-    # финальная проверка порядка и целостности
+        raise RuntimeError(f"не удалось создать кадры: {', '.join(failed[:12])} (подробности в 08_logs/flow.log)")
     for f in frames:
         ok, reason = validate_file(idir / f"{f['frame_id']}.png", min_w)
         if not ok:

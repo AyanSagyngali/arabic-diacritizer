@@ -7,6 +7,19 @@ app:
   port: 8765
   open_browser: true          # открыть панель в браузере при запуске
   language: ru
+  stage_auto_retries: 2       # автоматические повторы упавшего этапа (готовые подзадания не переделываются)
+  auto_topics: true           # искать темы автоматически при запуске панели
+
+pipeline:
+  stall_seconds: 240          # сторож: этап без прогресса дольше этого — перезапускается
+  stall_seconds_images: 360
+  stall_seconds_edit: 1200    # ChatCut ждёт распознавания речи и рендера
+
+turbo:                        # параллельность (ограничивается числом живых ключей Gemini: ≈2 запроса на ключ)
+  llm_workers: 4
+  parallel_chapters: true
+  image_workers: 6
+  voice_workers: 4
 
 paths:
   projects: ./projects
@@ -21,16 +34,19 @@ video:
 
 llm:
   provider: gemini
-  # Модели перебираются по порядку; если модели нет у ключа — берётся следующая.
-  # "auto:pro" / "auto:flash" = автоматически найти самую свежую модель через ListModels.
-  text_models: ["auto:pro", "gemini-2.5-pro", "auto:flash", "gemini-2.5-flash"]
-  fast_models: ["auto:flash", "gemini-2.5-flash"]
+  # Модели выбираются автоматически по списку ListModels (кэш data/models.json на сутки): свежие стабильные
+  # flash/pro/tts/image, без превью-мусора (customtools, exp, live…). Модель с 404 исключается навсегда.
+  # Можно закрепить свои модели, например:  models: {flash: [gemini-3.8-flash], pro: [gemini-3-pro]}
+  models: {}
   temperature: 0.7
-  max_retries: 5
+  thinking_budget: 512        # для моделей 2.x; у 3.x используется thinkingLevel=low/minimal
+  request_timeout: 90         # секунд на один запрос (соединение — 10 с)
+  call_deadline: 240          # общий предел на один вызов со всеми повторами и сменой ключей
   use_google_search: true     # grounding через Google Search для тем и исследования
 
 topics:
-  count: 8                    # сколько тем показывать
+  count: 6                    # сколько тем за один поиск («Сгенерировать ещё» добавляет новые)
+  youtube_seconds: 20         # предел времени на сбор данных YouTube
   cache_hours: 12
   recent_days: 45             # окно «свежих» видео конкурентов
   search_queries:             # запросы для поиска актуальных роликов в нише
@@ -47,6 +63,7 @@ script:
   words_per_minute: 150       # темп дикторской речи для расчёта объёма
   min_chapters: 4
   max_chapters: 9
+  review_min_minutes: 5       # финальная сверка сценария моделью pro — для роликов от 5 минут
 
 frames:
   words_per_frame: 15         # правило канала: ~1 кадр на 15 слов (≈6 с на кадр)
@@ -56,12 +73,12 @@ frames:
   aspect_ratio: "16:9"
 
 images:
-  backend: flow               # flow | gemini_api
+  backend: gemini_api         # gemini_api (быстро, параллельно) | flow (Google Flow в браузере, по одному кадру)
   fallback_backend: gemini_api  # если Flow недоступен/сломался; пусто = без запасного варианта
   retries_per_frame: 2        # немедленные повторы
   final_retry_rounds: 2       # повторные круги по неудачным кадрам в конце
   min_width: 1000
-  gemini_image_models: ["auto:image", "imagen-4.0-generate-001", "gemini-2.5-flash-image"]
+  request_timeout: 120
   flow:
     url: https://labs.google/fx/tools/flow
     headless: false
@@ -72,7 +89,7 @@ images:
 voice:
   speaker: Sadaltager
   style: friendly
-  tts_models: ["auto:tts-pro", "gemini-2.5-pro-preview-tts", "auto:tts", "gemini-2.5-flash-preview-tts"]
+  request_timeout: 150
   chunk_max_chars: 900        # размер части озвучки (по целым предложениям)
   chunk_min_chars: 250
   direction: >-
@@ -84,7 +101,7 @@ voice:
   pause_between_chapters_ms: 800
   edge_silence_ms: 120        # сколько тишины оставить по краям каждой части
   target_lufs: -16
-  retries: 4
+  retries: 3
 
 editing:
   default_transition: builtin:tr-cross-dissolve
@@ -136,6 +153,6 @@ chatcut:
 
 export:
   local_render: true          # локальный рендер ffmpeg (гарантированный результат + предпросмотр)
-  local_width: 1280
-  local_height: 720
-  burn_subtitles: true
+  local_width: 960           # предпросмотр; итоговое видео — экспорт ChatCut 1080p
+  local_height: 540
+  burn_subtitles: false       # true — вшить субтитры в видео (медленнее: полное перекодирование)

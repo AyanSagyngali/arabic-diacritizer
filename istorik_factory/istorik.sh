@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # ISTORIK VIDEO FACTORY — запуск (macOS / Linux)
 cd "$(dirname "$0")"
-[ -x .venv/bin/python ] || ./setup.sh
-. .venv/bin/activate
-exec python run.py "$@"
+[ -f .venv/.install_ok ] || python3 install.py || exit 1
+exec .venv/bin/python run.py "$@"

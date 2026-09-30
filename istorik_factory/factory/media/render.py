@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 
@@ -26,46 +28,61 @@ def _run(args: list[str]) -> None:
 
 
 def render(plan: dict, images_dir: Path, voice: Path, srt: Path | None, out: Path, width: int, height: int,
-           progress=None, check_stop=None) -> Path:
+           progress=None, check_stop=None, burn: bool = False) -> Path:
     fps = plan["fps"]
     seg_dir = out.parent / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    listing = []
     n = len(plan["images"])
-    for i, im in enumerate(plan["images"]):
-        if check_stop:
-            check_stop()
+    segs = [seg_dir / f"{im['frame_id']}_{im['duration']}_{im['zoom']}_{width}.mp4" for im in plan["images"]]
+    done = [sum(1 for s in segs if s.exists() and s.stat().st_size >= 1000)]
+    lock = threading.Lock()
+
+    def one(i: int) -> None:
+        im, seg = plan["images"][i], segs[i]
+        if seg.exists() and seg.stat().st_size >= 1000:
+            return
         frames = im["duration"]
-        seg = seg_dir / f"{im['frame_id']}_{frames}_{im['zoom']}_{width}.mp4"
-        if not seg.exists() or seg.stat().st_size < 1000:
-            z = "1+0.10*on/{d}" if im["zoom"] == "push" else "1.10-0.10*on/{d}"
-            z = z.format(d=max(1, frames - 1))
-            vf = (f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,crop={width * 2}:{height * 2},"
-                  f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih*0.46-(ih/zoom*0.46)':d={frames}:s={width}x{height}:fps={fps},"
-                  f"format=yuv420p")
-            tmp = seg.with_suffix(".tmp.mp4")
-            _run(["-loop", "1", "-i", str(images_dir / im["file"]), "-vf", vf, "-frames:v", str(frames),
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-r", str(fps), str(tmp)])
-            tmp.replace(seg)
-        listing.append(f"file '{seg.as_posix()}'")
+        z = ("1+0.10*on/{d}" if im["zoom"] == "push" else "1.10-0.10*on/{d}").format(d=max(1, frames - 1))
+        sw, sh = int(width * 1.3) // 2 * 2, int(height * 1.3) // 2 * 2  # запас под zoom 10% (больше — медленнее)
+        vf = (f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},"
+              f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih*0.46-(ih/zoom*0.46)':d={frames}:s={width}x{height}:fps={fps},"
+              f"format=yuv420p")
+        tmp = seg.with_suffix(".tmp.mp4")
+        # одно входное изображение → zoompan выдаёт d кадров: масштабирование выполняется один раз, а не на каждый кадр
+        _run(["-i", str(images_dir / im["file"]), "-vf", vf, "-frames:v", str(frames),
+              "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-r", str(fps), "-threads", "1", str(tmp)])
+        tmp.replace(seg)
+        with lock:
+            done[0] += 1
         if progress:
-            progress(i + 1, n)
+            progress(done[0], n)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(12, os.cpu_count() or 2))) as ex:
+        futs = [ex.submit(one, i) for i in range(n)]
+        for f in futs:
+            if check_stop:
+                check_stop()
+            f.result()
+    listing = [f"file '{s.resolve().as_posix()}'" for s in segs]
     concat = seg_dir / "concat.txt"
     concat.write_text("\n".join(listing) + "\n", encoding="utf-8")
     video_only = out.parent / "video_only.mp4"
     _run(["-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(video_only)])
     args = ["-i", str(video_only), "-i", str(voice)]
-    vf = None
-    if srt and srt.exists():
+    if burn and srt and srt.exists():  # вшитые субтитры — перекодирование всего видео (медленно)
         style = "FontName=Montserrat,FontSize=16,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=1,MarginV=28"
-        vf = f"subtitles='{_esc(srt)}':force_style='{style}'"
-    try:
-        _run([*args, *(["-vf", vf] if vf else []), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast",
-              "-crf", "21", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
-    except RuntimeError:
-        if not vf:
-            raise
-        _run([*args, "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
+        try:
+            _run([*args, "-vf", f"subtitles='{_esc(srt)}':force_style='{style}'", "-map", "0:v", "-map", "1:a",
+                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
+            video_only.unlink(missing_ok=True)
+            return out
+        except RuntimeError:
+            pass
+    # быстро: видео без перекодирования + отключаемая дорожка субтитров
+    subs = ["-i", str(srt)] if srt and srt.exists() else []
+    _run([*args, *subs, "-map", "0:v", "-map", "1:a", *(["-map", "2:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=rus"] if subs else []),
+          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
     video_only.unlink(missing_ok=True)
     return out
 
