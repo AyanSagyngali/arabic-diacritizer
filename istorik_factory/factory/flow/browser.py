@@ -1,4 +1,12 @@
-"""Общий браузер Playwright с постоянным профилем (вход в Google/ChatCut сохраняется между запусками)."""
+"""Общий браузер Playwright с постоянным профилем (вход в Google/ChatCut сохраняется между запусками).
+
+Автоматизация НЕ скрывается (никаких «stealth»-флагов). Вход в Google выполняется один раз вручную в обычном окне Chrome
+с этим же профилем (`python run.py --login`), дальше сессия сохраняется в профиле. Все вызовы — из одного потока
+(desktop_agent.worker): синхронный Playwright привязан к потоку.
+
+«Использовать мой Chrome»: если в настройках задан chrome_cdp_url (Chrome, запущенный с --remote-debugging-port),
+программа подключается к нему, а не запускает свой браузер.
+"""
 from __future__ import annotations
 
 import os
@@ -23,11 +31,15 @@ def context(headless: bool | None = None):
     from playwright.sync_api import sync_playwright
     if _pw is None:
         _pw = sync_playwright().start()
+    cdp = (config().at("providers.opts.chrome_cdp_url") or "").strip()
+    if cdp:  # пользователь сам запустил свой Chrome с отладочным портом — работаем в нём, ничего не закрываем
+        browser = _pw.chromium.connect_over_cdp(cdp, timeout=15000)
+        _ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        return _ctx
     profile = str(config().path("browser_profile"))
     headless = config().at("images.flow.headless", False) if headless is None else headless
     args = dict(user_data_dir=profile, headless=headless, accept_downloads=True,
-                viewport={"width": 1500, "height": 950}, locale="ru-RU",
-                args=["--disable-blink-features=AutomationControlled"], ignore_default_args=["--enable-automation"])
+                viewport={"width": 1400, "height": 900}, locale="ru-RU", timeout=60000)
     exe = config().at("images.flow.browser_executable") or os.environ.get("ISTORIK_BROWSER")
     if exe:
         args["executable_path"] = exe
@@ -58,7 +70,7 @@ def page_for(url_part: str, url: str):
 def close() -> None:
     global _pw, _ctx
     try:
-        if _ctx:
+        if _ctx and not (config().at("providers.opts.chrome_cdp_url") or "").strip():  # чужой (ваш) Chrome не закрываем
             _ctx.close()
     finally:
         _ctx = None

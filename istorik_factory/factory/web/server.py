@@ -28,10 +28,14 @@ STATIC = Path(__file__).parent / "static"
 
 
 def _startup() -> None:
-    """Проверка системы и автоматический поиск тем — в фоне, панель открывается мгновенно."""
+    """Проверка системы и автоматический поиск тем — в фоне, панель открывается мгновенно.
+    Ключи Gemini при старте НЕ проверяются запросами (это тратило время и квоту) — только по кнопке «Проверить ключи»."""
+    from ..core.status import monitor
+    monitor().start()
+
     def bg():
         try:
-            health.run_checks(deep_keys=True)
+            health.run_checks(deep_keys=False)
         except Exception as e:  # noqa: BLE001
             events.toast(f"Проверка системы: {e}", "error")
         if config().at("app.auto_topics", True) and not missing_secrets() and not topics.is_fresh():
@@ -151,27 +155,35 @@ def set_providers(body: ProvidersIn):
 
 @app.post("/api/providers/recommend")
 def recommend_providers(body: RecommendIn):
-    from ..providers.hw import detect
     from ..providers.recommend import recommend
     if body.part and body.part not in ("text", "voice", "images"):
         raise HTTPException(400, "неизвестная часть")
-    h = detect()
-    h["has_voice_sample"] = (config().path("data") / "voice_sample.wav").exists()
-    prof = config().path("browser_profile")
-    flow_ok = bool(config().at("flow.subscription", False)) or (prof.exists() and any(prof.iterdir()))
-    rec = recommend(h, flow_ok=flow_ok, part=body.part)
+    rec = compute_recommendation(body.part)
     if body.apply:
         if runner.busy:
             raise HTTPException(409, "Сначала остановите производство — источники меняются между проектами")
-        settings.save(config(), {"chains": rec["chains"], "opts": rec["opts"]})
+        settings.apply_recommendation(config(), rec, [body.part] if body.part else None)  # ручной выбор сохраняется
         rec["snapshot"] = _providers_changed()
     return rec
 
 
+def compute_recommendation(part: str | None = None) -> dict:
+    from ..core.status import monitor
+    from ..providers import install
+    from ..providers.recommend import recommend
+    h = dict(monitor().get("hw") or {})
+    h["has_voice_sample"] = (config().path("data") / "voice_sample.wav").exists()
+    opts = (config().get("providers") or {}).get("opts") or {}
+    flow_ok = opts.get("flow_subscription") == "1" or bool(config().at("flow.subscription", False))
+    return recommend(h, flow_ok=flow_ok, part=part, screen_ok=opts.get("screen_ack") == "1",
+                     installed=install.local_status())
+
+
 @app.get("/api/hw")
 def get_hw():
-    from ..providers.hw import describe, detect
-    h = detect()
+    from ..core.status import monitor
+    from ..providers.hw import describe
+    h = monitor().get("hw") or {}
     return {"hw": h, "text": describe(h)}
 
 

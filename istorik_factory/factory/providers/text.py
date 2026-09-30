@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import threading
 import time
 from typing import Any
@@ -15,7 +14,7 @@ from typing import Any
 import httpx
 
 from ..config import config, mock_mode, parse_keys
-from ..core.errors import BadResponse, LLMError, LLMTimeout, ProviderQuota, ProviderUnavailable
+from ..core.errors import AuthenticationError, BadResponse, LLMError, LLMTimeout, ProviderQuota, ProviderUnavailable
 from ..core.storage import read_json, write_json
 from ..llm.cache import DiskCache
 from . import facts
@@ -109,7 +108,8 @@ class TextBase:
 
     def generate_json_ex(self, prompt: str, system: str | None = None, search: bool = False, temperature: float | None = None,
                          schema: dict | None = None, tier: str = "flash", thinking: str = "off", cache: bool = True,
-                         retries: int = 1, deadline: float | None = None, search_query: str | None = None, **kw):
+                         retries: int = 1, deadline: float | None = None, search_query: str | None = None,
+                         max_tokens: int = 16384, **kw):
         from ..llm.gemini import parse_json
         spec = json_schema(schema)
         hint = f"\nСхема ответа (JSON Schema): {json.dumps(spec, ensure_ascii=False)}" if spec else ""
@@ -120,8 +120,8 @@ class TextBase:
             if d is not None and d < 3:
                 break
             text, sources = self.generate_ex(prompt + hint + JSON_SUFFIX, system, search, temperature if attempt == 0 else 0.2,
-                                             tier, thinking, schema=schema, cache=cache and attempt == 0, deadline=d,
-                                             search_query=search_query)
+                                             tier, thinking, max_tokens=max_tokens, schema=schema,
+                                             cache=cache and attempt == 0, deadline=d, search_query=search_query)
             try:
                 return parse_json(text), sources
             except ValueError as e:
@@ -144,6 +144,13 @@ class GeminiText(TextBase):
     def client(self):
         from ..llm.gemini import gemini, gemini_paid
         return gemini_paid() if self.pid == "gemini_paid" else gemini()
+
+    def configured(self) -> bool:
+        if mock_mode():
+            return True
+        from ..config import gemini_keys, parse_keys
+        import os
+        return bool(parse_keys(os.environ.get("GEMINI_PAID_API_KEY", ""))) if self.pid == "gemini_paid" else bool(gemini_keys())
 
     def available(self):
         if mock_mode():
@@ -228,6 +235,9 @@ class OpenAICompat(TextBase):
 
     def keys(self) -> list[str]:
         return _secret_values(self.spec["env"])
+
+    def configured(self) -> bool:
+        return mock_mode() or bool(self.keys())
 
     def available(self):
         if mock_mode():
@@ -331,7 +341,7 @@ class OpenAICompat(TextBase):
                     raise ProviderQuota(f"{self.info.label}: лимит исчерпан", min(self._key_cool.values()))
                 continue
             if r.status_code in (401, 403):
-                raise ProviderUnavailable(f"{self.info.label}: ключ не принят ({r.status_code})")
+                raise AuthenticationError(f"{self.info.label}: ключ не принят ({r.status_code}) — проверьте его в окне «Ключи»")
             if r.status_code == 404 or (r.status_code == 400 and "model" in text.lower()):
                 self._bad_models.add(model)
                 last = f"модель {model} недоступна"
@@ -344,91 +354,15 @@ class OpenAICompat(TextBase):
         raise LLMError(f"{self.info.label}: {last}")
 
 
-# ---------- Ollama ----------
-class OllamaText(TextBase):
+# ---------- Ollama (логика — в providers/ollama.py) ----------
+from . import ollama as _ollama  # noqa: E402
+
+
+class OllamaText(_ollama.OllamaText, TextBase):
     pid = "ollama"
 
     def __init__(self, http: httpx.Client | None = None):
-        super().__init__()
-        self.http = http or httpx.Client(timeout=httpx.Timeout(float(config().at("llm.ollama_timeout", 900)), connect=5))
-        self._checked = (0.0, False, "")
-        self._started = False
-
-    @property
-    def url(self) -> str:
-        return (config().at("providers.opts.ollama_url") or "http://127.0.0.1:11434").rstrip("/")
-
-    def model_name(self, tier: str = "flash") -> str:
-        return config().at("providers.opts.ollama_model") or "qwen3:8b"
-
-    def status(self) -> dict:
-        try:
-            r = self.http.get(f"{self.url}/api/tags", timeout=3)
-            names = [m.get("name", "") for m in r.json().get("models", [])]
-        except Exception:
-            return {"running": False, "models": [], "has_model": False}
-        want = self.model_name()
-        has = want in names or (":" not in want and any(n.split(":")[0] == want for n in names)) or f"{want}:latest" in names
-        return {"running": True, "models": names, "has_model": has}
-
-    def available(self):
-        if mock_mode():
-            return True, ""
-        t, ok, why = self._checked
-        if time.time() - t < 15:
-            return ok, why
-        st = self.status()
-        if not st["running"] and not self._started:
-            self._started = True
-            try:
-                from .install import ollama_exe
-                exe = ollama_exe()
-                if exe:
-                    subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     creationflags=0x08000000 if __import__("sys").platform.startswith("win") else 0)
-                    for _ in range(15):
-                        time.sleep(1)
-                        st = self.status()
-                        if st["running"]:
-                            break
-            except Exception:
-                pass
-        if not st["running"]:
-            res = (False, "Ollama не запущена или не установлена")
-        elif not st["has_model"]:
-            res = (False, f"в Ollama нет модели {self.model_name()} — нажмите «Установить»")
-        else:
-            res = (True, "")
-        self._checked = (time.time(), *res)
-        return res
-
-    def _complete(self, messages, temperature, max_tokens, schema, tier, deadline):
-        body: dict[str, Any] = {"model": self.model_name(), "messages": messages, "stream": False, "think": False,
-                                "options": {"temperature": temperature, "num_ctx": int(config().at("llm.ollama_ctx", 16384)),
-                                            "num_predict": int(max_tokens)}}
-        if schema is not None:
-            body["format"] = json_schema(schema)
-        t = min(float(config().at("llm.ollama_timeout", 900)), deadline or 1e9)
-        try:
-            r = self.http.post(f"{self.url}/api/chat", json=body, timeout=httpx.Timeout(t, connect=5))
-            if r.status_code == 400 and "think" in r.text:
-                body.pop("think", None)
-                r = self.http.post(f"{self.url}/api/chat", json=body, timeout=httpx.Timeout(t, connect=5))
-        except httpx.TimeoutException as e:
-            raise LLMTimeout(f"Ollama не ответила за {int(t)} с ({self.model_name()})") from e
-        except httpx.HTTPError as e:
-            self._checked = (0.0, False, "")
-            raise ProviderUnavailable(f"Ollama не запущена ({self.url})") from e
-        if r.status_code == 404:
-            raise ProviderUnavailable(f"в Ollama нет модели {self.model_name()} — нажмите «Установить»")
-        if r.status_code != 200:
-            raise LLMError(f"Ollama HTTP {r.status_code}: {r.text[:200]}")
-        try:
-            from .limits import limits
-            limits().record_local("ollama", self.model_name())
-        except Exception:
-            pass
-        return (r.json().get("message") or {}).get("content", "")
+        TextBase.__init__(self)
 
 
 # ---------- офлайн-заглушка (FACTORY_MOCK=1): та же маршрутизация, детерминированные ответы ----------
@@ -460,6 +394,9 @@ class MockText(TextBase):
 
 
 def make_text(pid: str):
+    if pid == "gemini_web":
+        from ..desktop_agent import gemini_web
+        return gemini_web.make()
     if mock_mode():
         return MockText(pid)
     if pid in ("gemini", "gemini_paid"):
@@ -494,10 +431,12 @@ class TextRouter:
     def generate_json(self, prompt: str, system: str | None = None, search: bool = False, fast: bool = True,
                       temperature: float | None = None, schema: dict | None = None, tier: str | None = None,
                       thinking: str = "off", cache: bool = True, retries: int = 1, deadline: float | None = None,
-                      search_query: str | None = None, only: str | None = None, **kw) -> Any:
+                      search_query: str | None = None, only: str | None = None, max_tokens: int | None = None,
+                      **kw) -> Any:
+        extra = {"max_tokens": int(max_tokens)} if max_tokens else {}
         obj, sources = self.router.call("generate_json_ex", prompt, system, search, temperature, schema,
                                         tier or ("flash" if fast else "pro"), thinking, cache, retries,
-                                        deadline=deadline, only=only, search_query=search_query)
+                                        deadline=deadline, only=only, search_query=search_query, **extra)
         self._local.sources = sources
         return obj
 

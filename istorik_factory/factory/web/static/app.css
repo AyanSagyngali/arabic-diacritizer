@@ -346,8 +346,12 @@ dialog[open]::backdrop { opacity: 1; }
 
 /* ---------- источники ---------- */
 .sources { margin-top: 16px; }
-.prov-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
-@media (max-width: 1080px) { .prov-grid { grid-template-columns: 1fr; } }
+.prov-grid { display: grid; gap: 14px; }
+.prov-grid-inner { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 1080px) { .prov-grid-inner { grid-template-columns: 1fr; } }
+.prov-flags { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r); }
+.prov-mode { font-size: 12.5px; padding: 5px 8px; }
+.connecting { display: flex; gap: 12px; align-items: center; max-width: 520px; margin: 40px auto; }
 .prov-part { display: grid; gap: 10px; align-content: start; min-width: 0; }
 .prov-part h3 { font-size: 15px; font-weight: 600; }
 .prov-part h3 .subtle { display: block; font-weight: 400; font-size: 12.5px; margin-top: 2px; }

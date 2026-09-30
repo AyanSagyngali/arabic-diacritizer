@@ -23,10 +23,8 @@ def snapshot() -> dict:
     s = settings.load(cfg)
     secrets = {i["secret"]: bool(os.environ.get(i["secret"], "").strip())
                for items in catalog_public().values() for i in items if i.get("secret")}
-    try:
-        h = hwmod.detect()
-    except Exception:
-        h = {}
+    from ..core.status import monitor
+    h = monitor().get("hw") or {}
     return {
         "settings": s, "catalog": catalog_public(), "secrets": secrets, "status": install.status(), "hw": h,
         "hw_text": hwmod.describe(h) if h else "",

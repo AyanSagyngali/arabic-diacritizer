@@ -36,7 +36,13 @@ const S = {
 async function api(url, opt = {}) {
   const init = { ...opt, headers: { "Content-Type": "application/json", ...(opt.headers || {}) } };
   if (init.body && typeof init.body !== "string") init.body = JSON.stringify(init.body);
-  const r = await fetch(url, init);
+  const ctl = new AbortController();  // ни один запрос не висит бесконечно
+  const timer = setTimeout(() => ctl.abort(), opt.timeout || 20000);
+  init.signal = ctl.signal;
+  let r;
+  try { r = await fetch(url, init); }
+  catch (e) { const err = new Error(e.name === "AbortError" ? "Программа не ответила вовремя" : "Нет связи с программой"); err.offline = true; throw err; }
+  finally { clearTimeout(timer); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { const e = new Error(j.detail || `Ошибка ${r.status}`); e.fix = j.fix; throw e; }
   return j;
@@ -229,6 +235,10 @@ function provReady(part, it) {
   if (route.cool_until && route.cool_until * 1000 > Date.now()) {
     return { ok: false, cool: true, text: `${route.reason || "лимит"} — пропускаю до ${clock(route.cool_until)}` };
   }
+  if (it.needs_ack && P.settings.opts.screen_ack !== "1") {
+    return { ok: false, text: "Экранный режим выключен — включите его выше, если согласны с предупреждением" };
+  }
+  if (it.id === "flow" && P.settings.opts.flow_subscription !== "1") out.text = "отметьте подписку AI Pro выше";
   if (it.secret && !it.optional_secret && !P.secrets[it.secret]) {
     return { ok: false, text: "Нужен ключ", act: `<button class="btn btn-sm" type="button" data-keys="${esc(it.secret)}">Ввести ключ</button>` };
   }
@@ -236,8 +246,9 @@ function provReady(part, it) {
     const s = st[it.install] || {};
     if (it.id === "ollama") {
       if (!s.installed) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "Ollama не установлена", err: !!ins.error, act: installBtn(it.install) };
-      if (!s.has_model) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : `Модель ${s.model} не скачана`, err: !!ins.error, act: installBtn(it.install, "Скачать модель") };
-      if (!s.running) out.text = "запустится автоматически";
+      if (s.checking) return { ok: false, text: "проверяю Ollama…" };
+      if (!s.has_model) return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "В Ollama нет ни одной модели", err: !!ins.error, act: installBtn(it.install, "Скачать модель") };
+      out.text = s.running ? `модель: ${s.model}${s.note ? ` (${s.note})` : ""}` : "запустится автоматически";
     } else if (!s.installed) {
       return { ok: false, text: ins.error ? `Ошибка: ${ins.error}` : "Не установлено", err: !!ins.error, act: installBtn(it.install) };
     }
@@ -254,7 +265,14 @@ function renderProviders() {
   const box = $("#provBox"); if (!box) return;
   const P = S.providers; if (!P) { box.innerHTML = `<div class="skel skel-line"></div><div class="skel skel-line"></div>`; return; }
   $("#provHw").textContent = P.hw_text || "";
-  box.innerHTML = PARTS.map(([part, title, sub]) => {
+  const O = P.settings.opts;
+  const modeSel = (part) => `<select class="prov-mode" data-mode="${part}" aria-label="Режим: ${part}">${[["hybrid", "Гибрид"], ["background", "Фон"], ["screen", "Экран"]]
+    .map(([v, l]) => `<option value="${v}" ${O["mode_" + part] === v ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  const head = `<div class="prov-flags">
+    <label class="row" style="gap:8px"><input type="checkbox" id="flowSub" ${O.flow_subscription === "1" ? "checked" : ""}> У меня есть Google AI Pro и доступ к Flow</label>
+    <label class="row" style="gap:8px"><input type="checkbox" id="screenAck" ${O.screen_ack === "1" ? "checked" : ""}> Экранный режим: Gemini и AI Studio в моём Chrome</label>
+    <span class="hint">Экранный режим медленнее API и, вероятно, нарушает правила Google об автоматическом доступе — аккаунт могут ограничить. На любой проверке (вход, CAPTCHA) программа останавливается и ждёт вас.</span></div>`;
+  box.innerHTML = head + `<div class="prov-grid-inner">` + PARTS.map(([part, title, sub]) => {
     const chain = P.settings.chains[part] || [];
     const rest = (P.catalog[part] || []).filter((x) => !chain.includes(x.id));
     const items = chain.map((id, i) => {
@@ -277,14 +295,21 @@ function renderProviders() {
         <p class="hint prov-needs">${esc(it.needs)}</p>${optSel}${state}</li>`;
     }).join("");
     return `<section class="prov-part" aria-labelledby="pp-${part}">
-      <div class="section-h"><h3 id="pp-${part}" class="grow">${title}<span class="subtle">${sub}</span></h3>
+      <div class="section-h"><h3 id="pp-${part}" class="grow">${title}<span class="subtle">${sub}</span></h3>${modeSel(part)}
         <button class="btn btn-sm" type="button" data-rec="${part}">Рекомендовать</button></div>
       <ol class="prov-chain" aria-label="${title}: порядок источников">${items}</ol>
       ${rest.length ? `<div class="prov-add"><select aria-label="${title}: добавить запасной источник" data-add="${part}">
         <option value="">+ добавить запасной источник…</option>${rest.map((x) => `<option value="${esc(x.id)}">${esc(x.label)} · ${esc(x.badge_text)}</option>`).join("")}</select></div>` : ""}
       ${S.recWhy?.[part] ? `<p class="hint prov-why">${esc(S.recWhy[part])}</p>` : ""}
     </section>`;
-  }).join("");
+  }).join("") + `</div>`;
+  $("#flowSub", box).addEventListener("change", (e) => saveProviders({ opts: { flow_subscription: e.target.checked ? "1" : "" } },
+    e.target.checked ? "Flow — первый источник кадров" : "Сохранено"));
+  $("#screenAck", box).addEventListener("change", async (e) => {
+    if (e.target.checked && !(await confirmDlg("Включить экранный режим?", "Программа будет писать в gemini.google.com и озвучивать в AI Studio в вашем Chrome, как это делали бы вы. Это медленнее API и, вероятно, нарушает правила Google об автоматическом доступе — аккаунт могут ограничить. Проверки (вход, CAPTCHA) программа не обходит — останавливается и ждёт вас.", "Включить"))) { e.target.checked = false; return; }
+    saveProviders({ opts: { screen_ack: e.target.checked ? "1" : "" } }, e.target.checked ? "Экранный режим включён" : "Экранный режим выключен");
+  });
+  $$("[data-mode]", box).forEach((sel) => sel.addEventListener("change", () => saveProviders({ opts: { ["mode_" + sel.dataset.mode]: sel.value } }, "Режим сохранён")));
   $$("[data-move]", box).forEach((b) => b.addEventListener("click", () => moveProv(b.closest(".prov-item"), +b.dataset.move)));
   $$("[data-remove]", box).forEach((b) => b.addEventListener("click", () => moveProv(b.closest(".prov-item"), 0)));
   $$("[data-add]", box).forEach((s) => s.addEventListener("change", () => {
@@ -339,12 +364,24 @@ function chainLine() {
   return PARTS.map(([part, title]) => `${title}: ${P.settings.chains[part].map((id) => provInfo(part, id).label).join(" → ")}`).join(" · ");
 }
 
+function llmText() {
+  const d = S.llm;
+  if (!d || d.done || Date.now() / 1000 - (d.at || 0) > 30) return "";
+  const pct = d.max_tokens ? Math.min(99, Math.round(100 * d.tokens / d.max_tokens)) : null;
+  return `${d.provider === "ollama" ? "Ollama" : d.provider} · ${d.model} · ${nf.format(d.tokens)} ток.${pct != null ? ` (≤${pct}%)` : ""} · ${d.tps} ток/с · ${fmtDur(d.elapsed)}`;
+}
+function renderLlmProgress() {
+  if (S.llm) S.llm.at = Date.now() / 1000;
+  $$("[data-llm]").forEach((el) => { el.textContent = llmText(); });
+}
+
 function renderTopicsStatus() {
   const box = $("#topicsStatus"); if (!box) return;
   const st = S.topicsStatus || {};
   if (st.running) {
     box.innerHTML = `<div class="search-status"><span class="spinner" aria-hidden="true"></span><span>${esc(st.stage || "Ищу темы…")}${st.provider ? ` · ${esc(provInfo("text", st.provider).label)}` : ""}</span>
-      <span class="subtle num" style="margin-left:auto" data-since="${st.started || 0}"></span></div>`;
+      <span class="subtle num" style="margin-left:auto" data-since="${st.started || 0}"></span></div>
+      <p class="hint num" data-llm style="margin:6px 0 0">${esc(llmText())}</p>`;
   } else if (st.error) {
     const alts = st.alternatives || [];
     box.innerHTML = `<div class="alert"><b>${esc(st.error)}</b><span class="muted">${esc(st.fix || "")}</span>
@@ -909,22 +946,40 @@ function connect() {
   on("frame", onFrame);
   on("voice", (d) => { if (S.project && d.project === S.project.id) { S.waveFor = null; loadWave(d.project, false); } });
   es.addEventListener("open", () => { if (S.lostConn) { S.lostConn = false; boot(true); } });
+  on("llm_progress", (d) => { S.llm = d; renderLlmProgress(); });
   es.addEventListener("error", () => { S.lostConn = true; });
 }
 
-async function boot(again) {
+function showConnecting(attempt, why) {
+  if (S.state) return;  // уже подключались — не прячем интерфейс, SSE переподключится сам
+  $("#view").innerHTML = `<section class="card card-pad connecting" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <div><b>ИСТОРИК FACTORY запускается…</b>
+    <div class="hint">Подключаюсь к программе${attempt > 1 ? ` · попытка ${attempt}` : ""}${why ? ` · ${esc(why)}` : ""}</div></div></section>`;
+}
+
+async function boot(again, attempt = 1) {
+  let st;
   try {
-    const st = await api("/api/state");
-    S.state = st; S.stages = st.stages; S.keys = st.keys; S.health = st.health; S.topicsStatus = st.topics_status || {};
-    S.usage = st.usage; S.providers = st.providers;
-    $("#channelLine").textContent = `канал «${st.channel || "ИСТОРИК"}»${st.mock ? " · тестовый режим" : ""}`;
-    renderKeysPill();
-  } catch (e) { fail(e); return; }
+    st = await api("/api/state", { timeout: 8000 });
+  } catch (e) {  // сервер ещё стартует или занят — повторяем с нарастающей паузой, а не бросаем пустую страницу
+    showConnecting(attempt, e.message);
+    const delay = Math.min(10000, 500 * 2 ** Math.min(attempt, 5));
+    setTimeout(() => boot(again, attempt + 1), delay);
+    return false;
+  }
+  S.state = st; S.stages = st.stages; S.keys = st.keys; S.health = st.health; S.topicsStatus = st.topics_status || {};
+  S.usage = st.usage; S.providers = st.providers;
+  $("#channelLine").textContent = `канал «${st.channel || "ИСТОРИК"}»${st.mock ? " · тестовый режим" : ""}`;
+  renderKeysPill();
   S.route = parseRoute();
-  if (!again) render();
+  if (!again || attempt > 1) render();
   await Promise.all([loadTopics(), loadProjects()]);
   if (again && S.route.name === "project") renderProjectView(S.route.id);
   if (!again && S.state.missing_secrets.length) setTimeout(() => openKeys(), 400);
+  if (!S.connected) { S.connected = true; connect(); }
+  return true;
 }
 
-boot(false).then(connect);
+showConnecting(1);
+boot(false);

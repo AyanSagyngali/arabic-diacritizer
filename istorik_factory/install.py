@@ -109,11 +109,23 @@ def main() -> None:
         if not shutil.which("ffprobe"):
             step("FFmpeg")
             run(["winget", "install", "-e", "--id", "Gyan.FFmpeg", "--accept-package-agreements", "--accept-source-agreements"], check=False)
-    step("Ярлык на рабочем столе")
+    step("Ярлык на рабочем столе, START_ISTORIK.bat и команда «start istorik»")
     shortcut()
+    try:
+        sys.path.insert(0, str(ROOT))
+        from factory import launcher
+        made = launcher.ensure(desktop=True, path_cmd=True)
+        print("  созданы: " + ", ".join(made) if made else "  уже на месте")
+    except Exception as e:  # noqa: BLE001
+        print(f"  не удалось создать файлы запуска: {e}")
+    step("Проверка установленных пакетов")
+    r = subprocess.run([str(PY), "-c", "import yaml, httpx, fastapi, uvicorn, PIL, numpy, playwright; print('ok')"],
+                       capture_output=True, text=True)
+    if "ok" not in r.stdout:
+        raise SystemExit("Пакеты установились не полностью:\n" + (r.stderr or "")[-800:] + "\nЗапустите py install.py ещё раз.")
     MARKER.write_text("ok", encoding="utf-8")
-    print("\nГотово! Запускайте ярлык «ИСТОРИК VIDEO FACTORY» на рабочем столе (или: .venv\\Scripts\\pythonw run.py).")
-    print("При первом запуске панель попросит вставить ключи Google AI Studio.")
+    print("\nГотово! Запуск: START_ISTORIK.bat (на рабочем столе и в папке программы) или в новом терминале:  start istorik")
+    print("Один раз войдите в Google для Flow/AI Studio:  .venv\\Scripts\\python run.py --login")
     if WIN and sys.stdin and sys.stdin.isatty():
         input("\nНажмите Enter, чтобы закрыть окно…")
 

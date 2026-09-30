@@ -1,7 +1,11 @@
 """ISTORIK VIDEO FACTORY — точка входа.
 
-  python run.py                      открыть панель управления (http://127.0.0.1:8765)
-  pythonw run.py                     то же без окна консоли (ярлык на рабочем столе)
+  START_ISTORIK.bat  /  start istorik   терминал-пульт (меню, команды стоп/пауза/продолжить) + веб-панель
+  python run.py                      то же самое из терминала
+  python run.py --panel              только веб-панель (http://127.0.0.1:8765)
+  pythonw run.py                     панель без окна консоли (ярлык на рабочем столе)
+  python run.py --login              открыть Chrome с профилем программы — один раз войти в Google (Flow, Gemini, AI Studio)
+  python run.py --debug              подробные ошибки в терминале
   python run.py --topic "Тема"       FULL AUTO без панели: от темы до «ГОТОВО»
   python run.py --resume <id>        RESUME: продолжить проект с последнего завершённого этапа
   python run.py --list               список проектов
@@ -32,17 +36,27 @@ BANNER = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
 
-def setup_logging() -> None:
-    """logs/app.log с ротацией (5 × 5 МБ). Под pythonw (нет консоли) весь вывод идёт в лог."""
+def setup_logging(console: str = "none") -> None:
+    """Журналы в logs/: app.log (всё), errors.log (предупреждения и ошибки), providers.log (переключения источников),
+    browser.log (экранный агент). Ротация 5 × 5 МБ. console: none — терминал печатает свой короткий журнал;
+    stream — поток журнала в консоль (FULL AUTO); debug — всё, с подробностями."""
     import logging
     from logging.handlers import RotatingFileHandler
     logs = ROOT / "logs"
     logs.mkdir(exist_ok=True)
-    handler = RotatingFileHandler(logs / "app.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    def fh(name, level=logging.INFO, logger=""):
+        h = RotatingFileHandler(logs / name, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+        h.setFormatter(fmt)
+        h.setLevel(level)
+        logging.getLogger(logger).addHandler(h)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    root.addHandler(handler)
+    fh("app.log")
+    fh("errors.log", logging.WARNING)
+    fh("providers.log", logging.INFO, "istorik.providers")
+    fh("browser.log", logging.INFO, "istorik.browser")
     for noisy in ("httpx", "httpcore", "uvicorn.access", "hpack"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -66,22 +80,32 @@ def setup_logging() -> None:
     if sys.stdout is None or "pythonw" in Path(sys.executable).name.lower():
         sys.stdout = ToLog(logging.INFO)
         sys.stderr = ToLog(logging.ERROR)
-    else:  # консоль: журнал проекта виден в окне
+    elif console in ("stream", "debug"):
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+        sh.setLevel(logging.DEBUG if console == "debug" else logging.INFO)
         logging.getLogger("istorik").addHandler(sh)
 
 
 def guard_install() -> None:
-    """Не стартовать, пока установка не закончена (раньше падало с «No module named 'yaml'»)."""
-    marker = ROOT / ".venv" / ".install_ok"
+    """Зависимости до старта: проверить → доустановить недостающее → проверить импорт → только потом запуск.
+    (Раньше без этого было «No module named 'yaml'».)"""
     missing = [m for m in REQUIRED if importlib.util.find_spec(m) is None]
     if not missing:
         return
-    msg = ("Установка ещё не завершена или прошла с ошибкой — не хватает: " + ", ".join(missing) + ".\n"
-           "Дождитесь окончания установки (окно install) или запустите заново:  py install.py")
-    if (ROOT / ".venv").exists() and not marker.exists():
-        msg = "Идёт установка зависимостей. Дождитесь её окончания и запустите программу снова.\n\n" + msg
+    print("Не хватает пакетов: " + ", ".join(missing) + " — доустанавливаю (1–3 минуты)…", flush=True)
+    import subprocess
+    py = sys.executable.replace("pythonw.exe", "python.exe")
+    r = subprocess.run([py, "-m", "pip", "install", "-r", str(ROOT / "requirements.txt"), "--disable-pip-version-check"],
+                       capture_output=True, text=True, timeout=1800)
+    importlib.invalidate_caches()
+    missing = [m for m in REQUIRED if importlib.util.find_spec(m) is None]
+    if not missing:
+        print("Пакеты установлены.", flush=True)
+        return
+    tail = (r.stderr or r.stdout or "").strip().splitlines()[-6:]
+    msg = ("Не удалось установить пакеты: " + ", ".join(missing) + ".\n\nОшибка pip:\n" + "\n".join(tail) +
+           "\n\nЗапустите установку заново:  py install.py  (нужен интернет).")
     print(msg, file=sys.stderr)
     _message_box(msg)
     sys.exit(2)
@@ -96,30 +120,32 @@ def _message_box(text: str) -> None:
             pass
 
 
-def ask_keys() -> None:
-    """Первый запуск в консоли: запросить ключи и сохранить в .env (в панели — поле «Ключи»)."""
-    from factory.config import gemini_keys, parse_keys, save_gemini_keys, save_secret, secret
-    if not sys.stdin or not sys.stdin.isatty():
-        return
-    if not gemini_keys():
-        import getpass
-        raw = getpass.getpass("Google AI Studio API key (можно несколько через запятую, Enter — ввести позже в панели):\n> ")
-        keys = parse_keys(raw)
-        if keys:
-            save_gemini_keys(keys)
-            print(f"  сохранено ключей: {len(keys)} (.env)")
-    if not secret("YOUTUBE_API_KEY") and gemini_keys():
-        import getpass
-        v = getpass.getpass("YouTube Data API key — необязательно, Enter чтобы пропустить:\n> ").strip()
-        if v:
-            save_secret("YOUTUBE_API_KEY", v)
-
-
 def port_busy(host: str, port: int) -> bool:
     import socket
     with socket.socket() as s:
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
+
+
+def open_login_browser() -> None:
+    """Открыть обычный Chrome (НЕ под управлением программы) с профилем программы — войти в Google/ChatCut один раз.
+    Вход в Google из окна под автоматизацией Google часто запрещает — поэтому вход делается здесь, руками."""
+    import shutil
+    import subprocess
+    from factory.config import config
+    prof = config().path("browser_profile")
+    exe = next((x for x in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                            str(Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe"))
+                if Path(x).exists()), None) or shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chrome")
+    if not exe:
+        print("Chrome не найден. Установите Google Chrome и повторите.")
+        return
+    urls = ["https://accounts.google.com", "https://labs.google/fx/tools/flow", "https://aistudio.google.com/generate-speech",
+            "https://gemini.google.com/app"]
+    print("Открываю Chrome с профилем ISTORIK. Войдите в Google (аккаунт с подпиской AI Pro), откройте Flow и AI Studio,\n"
+          "затем ЗАКРОЙТЕ это окно Chrome — вход сохранится для программы.")
+    subprocess.Popen([exe, f"--user-data-dir={prof}", "--no-first-run", *urls])
 
 
 def main() -> None:
@@ -131,30 +157,39 @@ def main() -> None:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--mock", action="store_true", help="офлайн-тест без сети и ключей")
     ap.add_argument("--selftest", action="store_true", help="проверка системы за 1–2 минуты")
-    ap.add_argument("--smoke", nargs="?", const="current", choices=["current", "keyless", "gemini"],
-                    help="реальный тест: 1-минутное видео с замером времени (keyless — всё без ключей, gemini — Gemini + запасные)")
+    ap.add_argument("--smoke", nargs="?", const="current", choices=["current", "keyless", "gemini", "mypc"],
+                    help="реальный тест: 1-минутное видео с замером времени (keyless — всё без ключей, gemini — Gemini + "
+                         "запасные, mypc — Ollama + Piper + Flow)")
+    ap.add_argument("--panel", action="store_true", help="только веб-панель, без терминального пульта")
+    ap.add_argument("--login", action="store_true", help="открыть Chrome с профилем программы для входа в Google")
+    ap.add_argument("--debug", action="store_true", help="подробные ошибки в терминале")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    setup_logging()
+    interactive = bool(sys.stdin and sys.stdin.isatty()) and "pythonw" not in Path(sys.executable).name.lower()
+    terminal_mode = interactive and not (args.panel or args.topic or args.resume or args.list or args.selftest or args.smoke)
+    setup_logging("debug" if args.debug else ("none" if terminal_mode else "stream"))
     guard_install()
     if args.mock:
         os.environ["FACTORY_MOCK"] = "1"
-    from factory.config import load_config, missing_secrets
+    from factory.config import load_config
     cfg = load_config()
+    try:
+        from factory import launcher
+        launcher.ensure()  # START_ISTORIK.bat создаётся локально (не блокируется Smart App Control)
+    except Exception:  # noqa: BLE001
+        pass
     print(BANNER)
 
+    if args.login:
+        open_login_browser()
+        return
     if args.selftest:
         from factory.selftest import selftest
         sys.exit(selftest())
     if args.smoke:
         from factory.selftest import smoke
         sys.exit(smoke(args.minutes or 1, None if args.smoke == "current" else args.smoke))
-
-    if not args.mock:
-        ask_keys()
-        if missing_secrets():
-            print("⚠ Ключ Google AI Studio не задан — добавьте его в панели (кнопка «Ключи»).")
 
     from factory.core.pipeline import runner
     from factory.core.project import Project
@@ -177,6 +212,11 @@ def main() -> None:
         print("\n" + (report if p.data["status"] == "done" and report else
                       f"Статус: {p.data['status']} — {p.data.get('current_operation', '')}"))
         sys.exit(0 if p.data["status"] == "done" else 1)
+
+    if terminal_mode:
+        from factory.terminal import main as terminal_main
+        terminal_main(debug=args.debug, panel=True)
+        return
 
     import uvicorn
     from factory.web.server import app

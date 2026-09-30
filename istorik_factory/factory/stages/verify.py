@@ -124,7 +124,8 @@ def run(ctx) -> None:
 
     # ---------- ЛОКАЛЬНЫЙ РЕНДЕР ----------
     local = None
-    if cfg.at("export.local_render", True):
+    # без ChatCut локальная сборка обязательна — иначе у пользователя не будет видео
+    if cfg.at("export.local_render", True) or cc.get("mode") != "mcp":
         p.progress("verify", 4, 6, "Экспорт: локальный рендер")
         from ..media.render import grab_frame, probe_duration, render
         out = p.export_dir / f"{p.data['id']}_preview.mp4"
@@ -146,6 +147,20 @@ def run(ctx) -> None:
                 raise
             ch.add("Экспорт", "локальный рендер", False, f"{type(e).__name__}: {str(e)[:300]}", "warn")
 
+    # ---------- ЧЕСТНОСТЬ: замены и неиспользованные источники ----------
+    st_img = read_json(p.images_dir / "images_state.json", {}) or {}
+    cards = [fid for fid, v in st_img.items() if (v or {}).get("backend") == "none"]
+    user_chain = ((cfg.get("providers") or {}).get("user_chains") or {}).get("images") or []
+    if cards and user_chain[:1] != ["none"]:
+        ch.add("Кадры", "кадры — настоящие изображения", False,
+               f"{len(cards)} из {len(frames)} кадров — титульные карточки (все источники кадров были недоступны)", "warn")
+    mode = cc.get("mode")
+    montage_note = {"mcp": "Монтаж: ChatCut ✓", "browser_agent": "Монтаж: ChatCut (через окно браузера)",
+                    "disabled": "Монтаж: локально (ChatCut выключен в настройках)"}.get(mode, "")
+    if mode == "local":
+        montage_note = "Монтаж: ChatCut НЕ выполнен — " + (cc.get("note") or "ChatCut недоступен") + "."
+        ch.add("ChatCut", "монтаж в ChatCut", False, cc.get("mcp_error", "")[:200], "warn")
+
     # ---------- ОТЧЁТ ----------
     p.progress("verify", 5, 6, "Финальный отчёт")
     result = p.data.setdefault("result", {})
@@ -162,10 +177,12 @@ def run(ctx) -> None:
         "voice_chunks": len(chunks), "chatcut_url": cc.get("editor_url"), "chatcut_mode": cc.get("mode"),
         "export_chatcut": export_info.get("file"), "export_local": local,
         "checks_total": len(ch.items), "checks_failed": len(ch.errors), "warnings": len(ch.warnings),
+        "montage_note": montage_note, "title_cards": len(cards),
         "errors": [f"{c['group']}: {c['check']} {c['detail']}" for c in ch.errors + ch.warnings],
     })
     p.save()
     write_json(p.export_dir / "checks.json", ch.items)
+    write_manifest(p)
     report = build_report(p, result, ch)
     write_text(p.export_dir / "REPORT.txt", report)
     result["report"] = report
@@ -304,6 +321,17 @@ def _export(ctx, b, ch: Checks) -> dict:
     return {"file": str(out)}
 
 
+def write_manifest(p) -> None:
+    """manifest.json: все материалы проекта (путь, размер, контрольная сумма) — для проверки и ручного продолжения."""
+    items = []
+    for d in (p.images_dir, p.voice_dir, p.edit_dir, p.export_dir):
+        for f in sorted(d.glob("*")):
+            if f.is_file() and f.suffix.lower() in (".png", ".wav", ".json", ".srt", ".md", ".mp4", ".txt"):
+                h = hashlib.sha1(f.read_bytes()).hexdigest()[:16] if f.stat().st_size < 200_000_000 else ""
+                items.append({"path": str(f.relative_to(p.root)).replace("\\", "/"), "bytes": f.stat().st_size, "sha1": h})
+    write_json(p.root / "manifest.json", {"project": p.data["id"], "title": p.data["title"], "files": items})
+
+
 def _srt_t(s: str) -> float:
     h, m, rest = s.split(":")
     sec, ms = rest.split(",")
@@ -348,7 +376,8 @@ def build_report(p, r: dict, ch: Checks) -> str:
         "Кадры:", f"{r['frames_done']} / {r['frames_total']}", "",
         "Озвучка:", f"{r['voice_chunks']} частей", "",
         "Источники:", _sources_line(r), "",
-        "Монтаж:", ok(cc_ok) + (f"  {r.get('chatcut_url')}" if r.get("chatcut_url") else "  (ChatCut не использовался)"), "",
+        "Монтаж:", (ok(cc_ok) + "  " if r.get("chatcut_mode") == "mcp" else "") + (f"{r.get('chatcut_url')}  " if r.get("chatcut_url") else "")
+        + (r.get("montage_note") or ""), "",
         "Субтитры:", ok(sub_ok), "",
         "Проверка:", f"{ok(not ch.errors)}  {r['checks_total'] - r['checks_failed']}/{r['checks_total']} проверок пройдено", "",
         "Ошибки:", ("\n".join(f"- {e}" for e in errs) if errs else "нет"), "",

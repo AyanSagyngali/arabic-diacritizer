@@ -12,7 +12,7 @@ from typing import Callable
 
 from ..config import channel_profile, config
 from . import events
-from .errors import CANCEL, StageStalled, StopRequested, humanize
+from .errors import CANCEL, StageStalled, StopRequested, UserActionRequired, humanize
 from .project import STAGE_KEYS, STAGES, Project
 
 StopRequested = StopRequested  # совместимость: from factory.core.pipeline import StopRequested
@@ -36,9 +36,29 @@ class Context:
     def check_stop(self) -> None:
         if self._runner.stop_event.is_set() or CANCEL.is_set():
             raise StopRequested()
+        if self._runner.pause_event.is_set():
+            self._wait_paused()
         if self.stalled.is_set():
             self.stalled.clear()
             raise StageStalled("нет прогресса дольше допустимого — шаг перезапущен")
+
+    def _wait_paused(self) -> None:
+        """Пауза: работа замирает в ближайшей безопасной точке и ждёт «продолжить» (прогресс уже сохранён)."""
+        p = self.project
+        with self._runner.pause_lock:
+            if self._runner.pause_event.is_set() and p.data.get("status") != "paused":
+                p.update(status="paused", current_operation="Пауза. Напишите «продолжить» (или нажмите «Продолжить»).")
+                self.log.log("Paused")
+        while self._runner.pause_event.is_set():
+            if self._runner.stop_event.is_set() or CANCEL.is_set():
+                raise StopRequested()
+            p.touch()
+            self.stalled.clear()
+            time.sleep(0.5)
+        with self._runner.pause_lock:
+            if p.data.get("status") == "paused":
+                p.update(status="running", current_operation="Продолжаю…")
+                self.log.log("Resumed after pause")
 
     def sleep(self, seconds: float) -> None:
         end = time.time() + seconds
@@ -80,6 +100,8 @@ class Runner:
         self.project: Project | None = None
         self.stop_event = threading.Event()
         self.continue_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_lock = threading.Lock()
         self._stage_impls: dict[str, Callable[[Context], None]] | None = None
         self.ctx: Context | None = None
 
@@ -102,12 +124,28 @@ class Runner:
         self.project = project
         self.stop_event.clear()
         self.continue_event.clear()
+        self.pause_event.clear()
         CANCEL.clear()
         self.thread = threading.Thread(target=self._run, args=(project, from_stage), daemon=True, name="pipeline")
         self.thread.start()
         events.publish("runner", {"busy": True, "project": project.data["id"]})
 
+    def pause(self) -> bool:
+        if not self.busy:
+            return False
+        self.pause_event.set()
+        events.publish("runner", {"busy": True, "paused": True, "project": self.project.data["id"] if self.project else None})
+        return True
+
+    def resume_paused(self) -> bool:
+        was = self.pause_event.is_set()
+        self.pause_event.clear()
+        if was:
+            events.publish("runner", {"busy": self.busy, "paused": False, "project": self.project.data["id"] if self.project else None})
+        return was
+
     def stop(self) -> None:
+        self.pause_event.clear()
         self.stop_event.set()
         CANCEL.set()
         self.continue_event.set()
@@ -121,13 +159,23 @@ class Runner:
         CANCEL.clear()
         self._run(project, from_stage)
 
+    def _run_stage(self, ctx: Context, impl) -> None:
+        """Этап; если нужен человек (вход, CAPTCHA) — ждём «продолжить» и повторяем этап (готовое не переделывается)."""
+        for _ in range(20):
+            try:
+                impl(ctx)
+                return
+            except UserActionRequired as e:
+                ctx.require_user(e.message, url=e.url)
+        raise RuntimeError("слишком много запросов действия пользователя подряд")
+
     # ---------- сторож ----------
     def _watchdog(self, ctx: Context, stop: threading.Event) -> None:
         cfg = config()
         while not stop.wait(2.0):
             p = ctx.project
             stage = p.data.get("current_stage")
-            if not stage or p.data.get("status") == "waiting_user":
+            if not stage or p.data.get("status") in ("waiting_user", "paused"):
                 p.touch()
                 continue
             limit = float(cfg.at(f"pipeline.stall_seconds_{stage}", cfg.at("pipeline.stall_seconds", 240)))
@@ -170,7 +218,7 @@ class Runner:
                     p.log.log(f"{labels[key]}: started" + (f" (attempt {attempt})" if attempt > 1 else ""))
                     try:
                         ctx.stalled.clear()
-                        impls[key](ctx)
+                        self._run_stage(ctx, impls[key])
                     except StopRequested:
                         raise
                     except Exception as e:  # этап упал: понятное сообщение + автоматический повтор

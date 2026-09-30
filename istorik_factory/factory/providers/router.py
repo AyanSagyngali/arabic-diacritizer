@@ -16,12 +16,13 @@ import httpx
 
 from ..config import config, mock_mode
 from ..core import events
-from ..core.errors import (AllKeysExhausted, BadResponse, LLMTimeout, ModelUnavailable, NoProviderLeft, NoValidKeys,
-                           ProviderQuota, ProviderUnavailable, RegionBlocked, StageStalled, StopRequested, humanize)
+from ..core.errors import (AllKeysExhausted, AuthenticationError, BadResponse, LLMTimeout, ModelUnavailable, NoProviderLeft,
+                           NotConfigured, NoValidKeys, ProviderQuota, ProviderUnavailable, RegionBlocked, StageStalled,
+                           StopRequested, TemporaryError, UserActionRequired, humanize)
 from .catalog import CATALOG, PARTS
 
 PROVIDER_ERRORS = (AllKeysExhausted, NoValidKeys, RegionBlocked, ModelUnavailable, LLMTimeout, ProviderUnavailable,
-                   ProviderQuota, httpx.HTTPError, ConnectionError, OSError, ImportError)
+                   ProviderQuota, TemporaryError, httpx.HTTPError, ConnectionError, OSError, ImportError)
 PART_WORD = {"text": "Текст", "voice": "Озвучка", "images": "Кадры"}
 
 
@@ -36,6 +37,7 @@ class Router:
         self.overrides: dict[str, Any] = {}      # для тестов: подмена источника
         self._tl = threading.local()             # какой источник выполнил последний вызов этого потока
         self.used: dict[str, int] = {}           # сколько вызовов выполнил каждый источник (для отчёта)
+        self.fails: dict[str, dict] = {}         # последняя ошибка источника (для панели)
 
     # ---------- состав ----------
     def chain(self) -> list[str]:
@@ -75,7 +77,8 @@ class Router:
         out = []
         for pid in self.chain():
             c = self.cooling(pid)
-            out.append({"id": pid, "cool_until": c[0] if c else None, "reason": c[1] if c else None, "active": pid == self.active})
+            out.append({"id": pid, "cool_until": c[0] if c else None, "reason": c[1] if c else None, "active": pid == self.active,
+                        "last_error": self.fails.get(pid)})
         return {"part": self.part, "active": self.active, "chain": out}
 
     def _publish(self) -> None:
@@ -95,6 +98,7 @@ class Router:
         chain = [only] if only else self.chain()
         if not chain:
             raise NoProviderLeft(self.part, ["цепочка источников пуста — выберите источник в «Источниках»"])
+        skipped: list[str] = []
         for i, pid in enumerate(chain):
             name = CATALOG[self.part][pid].label if pid in CATALOG[self.part] else pid
             c = self.cooling(pid) if not only else None
@@ -111,21 +115,33 @@ class Router:
                 kw["deadline"] = remaining
             try:
                 prov = self.get(pid)
+                conf = getattr(prov, "configured", None)
+                if conf is not None and not conf():
+                    raise NotConfigured("не настроен")
                 ok, why = prov.available() if hasattr(prov, "available") else (True, "")
                 if not ok:
                     raise ProviderUnavailable(why)
                 res = getattr(prov, method)(*args, **kw)
-            except (StopRequested, StageStalled):
+            except (StopRequested, StageStalled, UserActionRequired):
                 raise
+            except NotConfigured:  # нет ключа / не установлен — молча дальше, в текст ошибки не попадает
+                skipped.append(name)
+                continue
             except PROVIDER_ERRORS as e:
                 until = getattr(e, "reset_at", None) or time.time() + float(config().at("providers.cooldown_seconds", 600) or 600)
-                if isinstance(e, (LLMTimeout, httpx.TimeoutException)):
+                if isinstance(e, (LLMTimeout, httpx.TimeoutException, TemporaryError)):
                     until = time.time() + 120
+                if isinstance(e, AuthenticationError):
+                    until = time.time() + 6 * 3600
                 reason = humanize(e)["title"] if not isinstance(e, ProviderUnavailable) else str(e)
                 self.cool[pid] = (until, reason[:160])
                 resets.append(until)
                 errors.append(f"{name}: {reason[:160]}")
+                self.fails[pid] = {"at": time.time(), "reason": reason[:200]}
                 nxt = next((CATALOG[self.part][x].label for x in chain[i + 1:] if x in CATALOG[self.part] and not self.cooling(x)), None)
+                import logging
+                logging.getLogger("istorik.providers").warning("%s: %s — %s%s", PART_WORD[self.part], name, reason[:160],
+                                                               f" → {nxt}" if nxt else "")
                 if not mock_mode() or config().at("providers.toast_in_mock", False):
                     events.toast(f"{PART_WORD[self.part]}: {name} — {reason[:90]}" + (f". Переключаюсь на «{nxt}»" if nxt else ""),
                                  "warning")
@@ -133,6 +149,7 @@ class Router:
                 continue
             except (BadResponse, ValueError, KeyError, TypeError, RuntimeError) as e:
                 errors.append(f"{name}: {str(e)[:160]}")  # ошибка этого запроса — источник не остывает
+                self.fails[pid] = {"at": time.time(), "reason": str(e)[:200]}
                 continue
             self._tl.pid = pid
             self.used[pid] = self.used.get(pid, 0) + 1
@@ -140,6 +157,8 @@ class Router:
                 self.active = pid
                 self._publish()
             return res
+        if not errors and skipped:
+            errors.append("не настроен ни один источник (" + ", ".join(skipped) + ") — добавьте ключ или установите локальный")
         future = [r for r in resets if r > time.time()]
         raise NoProviderLeft(self.part, errors, min(future) if future else None)
 

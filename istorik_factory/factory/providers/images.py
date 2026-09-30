@@ -8,7 +8,6 @@ import threading
 import time
 import urllib.parse
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -53,6 +52,10 @@ class ImageBase:
 class GeminiImages(ImageBase):
     pid = "gemini_api"
 
+    def configured(self) -> bool:
+        from ..config import gemini_keys
+        return bool(gemini_keys())
+
     def available(self):
         from ..llm.gemini import gemini
         c = gemini()
@@ -69,18 +72,19 @@ class GeminiImages(ImageBase):
 
 
 class FlowImages(ImageBase):
-    """Google Flow по подписке. Playwright работает только в своём потоке — все вызовы идут в один выделенный поток."""
+    """Google Flow по подписке. Все действия — в общем потоке браузера (desktop_agent.worker)."""
     pid = "flow"
     parallel = False
 
     def __init__(self, ctx=None):
         super().__init__()
         self.ctx = ctx
-        self._ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="flow")
         self._backend = None
 
     def bind(self, ctx) -> None:
         self.ctx = ctx
+        if self._backend is not None:
+            self._backend.ctx = ctx
 
     def _impl(self):
         if self._backend is None:
@@ -93,21 +97,14 @@ class FlowImages(ImageBase):
         return self._backend
 
     def generate(self, frame: dict, deadline: float | None = None) -> bytes:
-        fut = self._ex.submit(lambda: self._impl().generate(frame))
-        return fut.result(timeout=float(config().at("images.flow.per_frame_timeout_sec", 240)) + 600)
+        from ..desktop_agent import worker
+        return worker.run(lambda: self._impl().generate(frame),
+                          float(config().at("images.flow.per_frame_timeout_sec", 240)) + 300, "Google Flow")
 
     def close(self) -> None:
-        def _close():
-            try:
-                from ..flow import browser
-                browser.close()
-            except Exception:
-                pass
-        try:
-            self._ex.submit(_close).result(timeout=20)
-        except Exception:
-            pass
-        self._ex.shutdown(wait=False)
+        from ..desktop_agent import worker
+        worker.reset()
+        self._backend = None
 
 
 def _profile_negative() -> str:
@@ -141,8 +138,14 @@ class ComfyUI(ImageBase):
         except httpx.HTTPError:
             return False
 
+    def configured(self) -> bool:
+        from .install import comfy_main
+        return bool(comfy_main()) or self.running()
+
     def available(self):
         if self.running():
+            from ..core.resources import resources
+            resources().acquire_gpu("comfyui")
             return True, ""
         if not self._started:
             self._started = True
@@ -172,6 +175,8 @@ class ComfyUI(ImageBase):
         }
 
     def generate(self, frame: dict, deadline: float | None = None) -> bytes:
+        from ..core.resources import resources
+        resources().acquire_gpu("comfyui")  # на 4 ГБ видеопамяти Ollama и ComfyUI не помещаются вместе
         seed = random.randint(1, 2 ** 31)
         cid = uuid.uuid4().hex
         try:
@@ -244,6 +249,9 @@ class HFImages(ImageBase):
         import os
         self.token = os.environ.get("HF_TOKEN", "").strip()
         self.http = http or httpx.Client(timeout=httpx.Timeout(120, connect=10))
+
+    def configured(self) -> bool:
+        return bool(self.token)
 
     def available(self):
         return (True, "") if self.token else (False, "нет токена HF_TOKEN (добавьте в окне «Ключи»)")
@@ -370,12 +378,13 @@ def reset() -> None:
 
 
 def primary_parallel() -> bool:
+    from ..core.parallel import primary_of
     r = router()
-    ch = [p for p in r.chain() if not r.cooling(p)] or r.chain()
+    pid = primary_of(r)
     try:
-        return bool(getattr(r.get(ch[0]), "parallel", True)) if ch else True
+        return bool(getattr(r.get(pid), "parallel", True)) if pid else False
     except Exception:
-        return True
+        return False
 
 
 def generate(frame: dict, ctx=None) -> tuple[bytes, str]:

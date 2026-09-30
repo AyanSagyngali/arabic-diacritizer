@@ -121,6 +121,10 @@ class VoiceBase:
 class GeminiTTS(VoiceBase):
     pid = "gemini"
 
+    def configured(self) -> bool:
+        from ..config import gemini_keys
+        return bool(gemini_keys())
+
     def available(self):
         from ..llm.gemini import gemini
         c = gemini()
@@ -147,6 +151,10 @@ class PiperTTS(VoiceBase):
 
     def voice_name(self) -> str:
         return config().at("providers.opts.piper_voice") or "ru_RU-denis-medium"
+
+    def configured(self) -> bool:
+        from .install import has
+        return has("piper")
 
     def available(self):
         try:
@@ -193,6 +201,10 @@ class SileroTTS(VoiceBase):
     pid = "silero"
     RATE = 48000
 
+    def configured(self) -> bool:
+        from .install import has
+        return has("torch")
+
     def available(self):
         try:
             import torch  # noqa: F401
@@ -238,6 +250,10 @@ class ChatterboxTTS(VoiceBase):
     def sample() -> Path:
         return config().path("data") / "voice_sample.wav"
 
+    def configured(self) -> bool:
+        from .install import has
+        return has("chatterbox")
+
     def available(self):
         try:
             import chatterbox  # noqa: F401
@@ -249,6 +265,8 @@ class ChatterboxTTS(VoiceBase):
 
     def _model(self):
         global _cb
+        from ..core.resources import resources
+        resources().acquire_gpu("chatterbox")
         with _cb_lock:
             if _cb is None:
                 import torch
@@ -268,9 +286,25 @@ class ChatterboxTTS(VoiceBase):
         return (np.clip(a, -1, 1) * 32767).astype("<i2").tobytes(), int(getattr(m, "sr", 24000))
 
 
+def release_chatterbox() -> None:
+    """Выгрузить Chatterbox из видеопамяти (менеджер ресурсов)."""
+    global _cb
+    with _cb_lock:
+        _cb = None
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class EdgeTTS(VoiceBase):
     """Голоса Microsoft Edge через пакет edge-tts: без ключа, но неофициально — может перестать работать."""
     pid = "edge"
+
+    def configured(self) -> bool:
+        from .install import has
+        return has("edge_tts")
 
     def available(self):
         try:
@@ -333,6 +367,9 @@ class MockVoice(VoiceBase):
 
 
 def make_voice(pid: str):
+    if pid == "aistudio":
+        from ..desktop_agent import aistudio
+        return aistudio.make()
     if mock_mode():
         return MockVoice(pid)
     cls = {"gemini": GeminiTTS, "piper": PiperTTS, "silero": SileroTTS, "chatterbox": ChatterboxTTS, "edge": EdgeTTS,

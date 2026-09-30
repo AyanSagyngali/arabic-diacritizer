@@ -1,18 +1,24 @@
 """Каталог источников для каждой части производства: текст, озвучка, кадры.
 
-Пометки (как в панели):
-  free        ∞ без лимита          — локально или бесплатный сервис без дневного лимита
-  key         🔑 ключ · лимит N/день — бесплатный API-ключ с дневным лимитом
-  sub         ⭐ подписка            — по вашей подписке (Google AI Pro/Ultra)
-  paid        💳 платно              — оплата за использование, «почти без лимита»
-  unofficial  ⚠ неофициально        — работает без ключа, но не через официальный API (не по умолчанию)
+Пометки (как в панели) — честные, без «∞» у онлайн-сервисов с квотой:
+  local       ∞ локально             — на вашем компьютере: без квот, но ограничено железом и временем
+  free        бесплатно              — бесплатный онлайн-сервис (очередь/ограничение скорости)
+  key         🔑 ключ · квота         — API-ключ с дневной квотой
+  sub         ⭐ подписка             — по вашей подписке (Google AI Pro/Ultra)
+  paid        💳 платно               — оплата за использование
+  unofficial  ⚠ неофициально         — не через официальный API (не по умолчанию)
+  screen      🖥 экран                — программа управляет вашим браузером на экране (включается отдельно)
+  skip        — пропустить           — часть не делается (сознательный выбор)
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-BADGES = {"free": "∞ без лимита", "key": "🔑 ключ", "sub": "⭐ подписка", "paid": "💳 платно", "unofficial": "⚠ неофициально"}
+BADGES = {"local": "∞ локально", "free": "бесплатно", "key": "🔑 ключ", "sub": "⭐ подписка", "paid": "💳 платно",
+          "unofficial": "⚠ неофициально", "screen": "🖥 экран", "skip": "— пропустить"}
 PARTS = {"text": "Текст — темы, исследование, сценарий, промты", "voice": "Озвучка", "images": "Кадры"}
+MODES = {"background": "Фон — API и локальные программы", "screen": "Экран — через ваш браузер, видно на экране",
+         "hybrid": "Гибрид — в фоне, при лимите/сбое — через экран"}
 
 
 @dataclass(frozen=True)
@@ -29,16 +35,18 @@ class Info:
     search: bool = False       # умеет искать в Google сам
     parallel: int = 4          # сколько запросов одновременно разумно
     optional_secret: bool = False
+    screen: bool = False       # работает через браузер на экране
+    needs_ack: bool = False    # экранный доступ к сервису, у которого есть API: включается один раз с предупреждением
 
     def public(self) -> dict:
         d = asdict(self)
-        d["badge_text"] = BADGES[self.badge] + (f" · {self.limit}" if self.badge == "key" and self.limit else "")
+        d["badge_text"] = BADGES[self.badge] + (f" · {self.limit}" if self.badge in ("key", "free", "sub") and self.limit else "")
         return d
 
 
 CATALOG: dict[str, dict[str, Info]] = {
     "text": {
-        "gemini": Info("gemini", "text", "Gemini API", "key", "≈250/день на проект (flash)",
+        "gemini": Info("gemini", "text", "Gemini API", "key", "≈250 запросов/день на проект",
                        "Ключи Google AI Studio. Единственный с поиском Google.", secret="GEMINI_API_KEY", search=True),
         "groq": Info("groq", "text", "Groq (Llama 3.3 70B / GPT-OSS 120B)", "key", "1 000/день, 30 в минуту",
                      "Бесплатный ключ: console.groq.com → API Keys.", secret="GROQ_API_KEY", parallel=3),
@@ -48,9 +56,14 @@ CATALOG: dict[str, dict[str, Info]] = {
                         "Ключ: console.mistral.ai (бесплатный план Experiment).", secret="MISTRAL_API_KEY", parallel=1),
         "cerebras": Info("cerebras", "text", "Cerebras (GPT-OSS 120B)", "key", "1 млн токенов/день, пробные кредиты",
                          "Ключ: cloud.cerebras.ai.", secret="CEREBRAS_API_KEY", parallel=2),
-        "ollama": Info("ollama", "text", "Ollama — локальная модель", "free", "∞",
-                       "Программа Ollama и модель 3–20 ГБ. Быстро — с видеокартой от 8 ГБ, на процессоре медленно. "
-                       "Поиска Google нет: факты берутся из Википедии.", install="ollama", local=True, parallel=2),
+        "ollama": Info("ollama", "text", "Ollama — локальная модель", "local", "",
+                       "Программа Ollama и модель 2–20 ГБ (берётся лучшая установленная). На 4 ГБ видеопамяти — qwen3:4b, "
+                       "медленнее Gemini и проще по-русски. Поиска Google нет: факты — из Википедии.", install="ollama",
+                       local=True, parallel=1),
+        "gemini_web": Info("gemini_web", "text", "Gemini в Chrome (на экране)", "screen", "",
+                           "Ваш Chrome с входом в Google: программа пишет в gemini.google.com и забирает ответ. Медленно, "
+                           "человеческим темпом; может нарушать правила Google — включается отдельно.", screen=True,
+                           needs_ack=True, search=True, parallel=1),
         "gemini_paid": Info("gemini_paid", "text", "Gemini с оплатой", "paid", "тысячи запросов в день",
                             "Ключ из проекта Google Cloud с включённой оплатой (Billing). Ролик ≈ 0,05–0,5 $.",
                             secret="GEMINI_PAID_API_KEY", search=True),
@@ -58,44 +71,55 @@ CATALOG: dict[str, dict[str, Info]] = {
     "voice": {
         "gemini": Info("gemini", "voice", "Gemini TTS — Sadaltager", "key", "≈100 частей/день на проект",
                        "Ключи Google AI Studio. Самый живой дикторский голос.", secret="GEMINI_API_KEY"),
-        "piper": Info("piper", "voice", "Piper — локально", "free", "∞",
+        "aistudio": Info("aistudio", "voice", "AI Studio в Chrome — Sadaltager (на экране)", "screen", "",
+                         "Ваш Chrome с входом в Google: Generate speech в aistudio.google.com, голос Sadaltager, по частям. "
+                         "Медленно; может нарушать правила Google — включается отдельно.", screen=True, needs_ack=True,
+                         parallel=1),
+        "piper": Info("piper", "voice", "Piper — локально", "local", "",
                       "Процессор, голос ≈ 60 МБ. Очень быстро, звучит проще Gemini.", install="piper", local=True, parallel=2),
-        "silero": Info("silero", "voice", "Silero — локально", "free", "∞",
+        "silero": Info("silero", "voice", "Silero — локально", "local", "",
                        "Процессор, torch ≈ 200 МБ + модель ≈ 100 МБ. Хорошее русское произношение.",
                        install="silero", local=True, parallel=1),
-        "chatterbox": Info("chatterbox", "voice", "Chatterbox — ваш голос (клонирование)", "free", "∞",
+        "chatterbox": Info("chatterbox", "voice", "Chatterbox — ваш голос (клонирование)", "local", "",
                            "Образец вашего голоса 10–30 с. Видеокарта NVIDIA от 8 ГБ (на процессоре очень медленно), ≈ 4 ГБ на диске.",
                            install="chatterbox", local=True, parallel=1),
-        "edge": Info("edge", "voice", "Microsoft Edge TTS", "unofficial", "∞",
+        "edge": Info("edge", "voice", "Microsoft Edge TTS", "unofficial", "",
                      "Без ключа, через голоса браузера Edge. Неофициально — может перестать работать.", install="edge", parallel=3),
-        "none": Info("none", "voice", "Нет — без озвучки", "free", "∞",
+        "none": Info("none", "voice", "Нет — без озвучки", "skip", "",
                      "Видео собирается по расчётным таймкодам, субтитры остаются.", parallel=8),
     },
     "images": {
-        "gemini_api": Info("gemini_api", "images", "Gemini API (Nano Banana / Imagen)", "key", "≈100 кадров/день на проект",
+        "gemini_api": Info("gemini_api", "images", "Gemini API (Nano Banana / Imagen)", "key", "≈100 кадров/день на проект; "
+                           "у бесплатных ключей часто 0",
                            "Ключи Google AI Studio.", secret="GEMINI_API_KEY", parallel=6),
-        "flow": Info("flow", "images", "Google Flow — по подписке", "sub", "по подписке AI Pro",
-                     "Подписка Google AI Pro/Ultra и вход в Google в окне программы. По одному кадру.", parallel=1),
-        "comfyui": Info("comfyui", "images", "ComfyUI — локально (FLUX / SDXL)", "free", "∞",
-                        "Видеокарта NVIDIA от 8 ГБ, 10–25 ГБ на диске.", install="comfyui", local=True, parallel=1),
-        "pollinations": Info("pollinations", "images", "Pollinations (FLUX)", "free", "∞ · ≈1 кадр в 15 с",
+        "flow": Info("flow", "images", "Google Flow — по подписке (на экране)", "sub", "лимит подписки AI Pro",
+                     "Подписка Google AI Pro/Ultra и один раз вход в Google в окне программы. Кадры по одному, ≈20–60 с.",
+                     parallel=1, screen=True),
+        "comfyui": Info("comfyui", "images", "ComfyUI — локально (FLUX / SDXL)", "local", "",
+                        "Видеокарта NVIDIA от 8 ГБ, 10–25 ГБ на диске. На 4 ГБ практически бесполезно (минуты на кадр).",
+                        install="comfyui", local=True, parallel=1),
+        "pollinations": Info("pollinations", "images", "Pollinations (FLUX)", "free", "≈1 кадр в 15 с",
                              "Без ключа. С бесплатным токеном — быстрее и без водяного знака.", secret="POLLINATIONS_TOKEN",
                              optional_secret=True, parallel=1),
         "hf": Info("hf", "images", "Hugging Face (FLUX.1 schnell)", "key", "небольшой бесплатный кредит в месяц",
                    "Бесплатный токен huggingface.co → Settings → Access Tokens.", secret="HF_TOKEN", parallel=2),
-        "none": Info("none", "images", "Нет — без картинок", "free", "∞",
+        "none": Info("none", "images", "Нет — без картинок", "skip", "",
                      "Вместо кадров — титульные карточки с текстом в стиле канала.", parallel=8),
     },
 }
 
-DEFAULT_CHAINS = {"text": ["gemini", "groq", "openrouter", "ollama"], "voice": ["gemini", "piper"],
-                  "images": ["gemini_api", "pollinations", "none"]}
+# источники без ключа/установки пропускаются молча; экранные — только после согласия; «Нет» — только осознанно
+DEFAULT_CHAINS = {"text": ["gemini", "groq", "openrouter", "ollama", "gemini_web"], "voice": ["gemini", "aistudio", "piper"],
+                  "images": ["gemini_api", "pollinations"]}
+FLOW_CHAIN = ["flow", "gemini_api", "pollinations"]
 
-OLLAMA_MODELS = {  # лучшие для русского текста (Qwen3 — сильнее всех в неанглийских задачах; Gemma 3 — запасной)
+OLLAMA_MODELS = {  # "" — автоматически лучшая из установленных; дальше — лучшие для русского текста (Qwen3 — сильнее всех в неанглийских задачах; Gemma 3 — запасной)
+    "": "Автоматически — лучшая установленная",
     "qwen3:32b": "Qwen3 32B — лучшее качество (видеокарта от 24 ГБ)",
     "qwen3:14b": "Qwen3 14B — баланс (видеокарта от 12 ГБ)",
     "qwen3:8b": "Qwen3 8B — быстро (видеокарта от 8 ГБ или 16 ГБ ОЗУ)",
-    "qwen3:4b": "Qwen3 4B — слабый ПК (8 ГБ ОЗУ)",
+    "qwen3:4b": "Qwen3 4B — видеокарта 4 ГБ / 8 ГБ ОЗУ (лучший JSON среди маленьких)",
+    "gemma3:4b": "Gemma 3 4B — видеокарта 4 ГБ (живее русская проза, слабее JSON)",
     "gemma3:27b": "Gemma 3 27B (видеокарта от 20 ГБ)",
     "gemma3:12b": "Gemma 3 12B (видеокарта от 10 ГБ)",
 }

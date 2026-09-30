@@ -89,6 +89,25 @@ def run_checks(deep_keys: bool = True) -> dict:
             except Exception as e:
                 items.append(item("models", "Модели Gemini", False, str(e)[:150]))
 
+        if not mock_mode():  # локальные источники без ключей
+            try:
+                from .providers import install as _inst
+                from .providers import ollama as _ol
+                st = _ol.probe(2.0)
+                if st["running"]:
+                    m, why = _ol.select_model(st["models"], config().at("providers.opts.ollama_model") or "",
+                                              __import__("factory.providers.hw", fromlist=["detect"]).detect())
+                    items.append(item("ollama", "Ollama (текст без ключей)", bool(m),
+                                      f"модель {m}" + (f" — {why}" if why else "") if m else "нет ни одной модели", None,
+                                      severity="warn"))
+                else:
+                    items.append(item("ollama", "Ollama (текст без ключей)", False,
+                                      "не запущена" if _inst.ollama_exe() else "не установлена", None, severity="warn"))
+                loc = _inst.local_status()
+                items.append(item("piper", "Piper (голос без ключей)", loc["piper"]["installed"],
+                                  config().at("providers.opts.piper_voice") or "", None, severity="warn"))
+            except Exception as e:  # noqa: BLE001
+                items.append(item("local", "Локальные источники", False, str(e)[:120], None, severity="warn"))
         cc = read_json(config().path("data") / "chatcut_oauth.json", {}) or {}
         if config().at("chatcut.enabled", True):
             items.append(item("chatcut", "Вход в ChatCut", bool(cc.get("tokens")), "выполнен" if cc.get("tokens") else "не выполнен",

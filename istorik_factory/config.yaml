@@ -75,7 +75,8 @@ script:
   words_per_minute: 150       # темп дикторской речи для расчёта объёма
   min_chapters: 4
   max_chapters: 9
-  review_min_minutes: 5       # финальная сверка сценария моделью pro — для роликов от 5 минут
+  review: true               # финальная сверка сценария моделью pro (тратит квоту Gemini; только при Gemini API)
+  review_min_minutes: 10      # и только для роликов от 10 минут
 
 frames:
   words_per_frame: 15         # правило канала: ~1 кадр на 15 слов (≈6 с на кадр)

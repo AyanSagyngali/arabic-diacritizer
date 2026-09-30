@@ -31,6 +31,9 @@ class BadResponse(LLMError):
     """Пустой ответ / битый JSON / отказ модели."""
 
 
+ValidationError = BadResponse  # результат не прошёл проверку — перегенерировать
+
+
 class RegionBlocked(LLMError):
     pass
 
@@ -52,12 +55,40 @@ class ProviderUnavailable(LLMError):
     """Источник не готов: не установлен, не запущен, нет ключа или нет сети."""
 
 
+class NotConfigured(ProviderUnavailable):
+    """Источник не настроен (нет ключа / не установлен) — маршрутизатор пропускает его молча."""
+
+
+class AuthenticationError(ProviderUnavailable):
+    """Ключ/вход не принят (401/403): повторять бессмысленно, нужен пользователь."""
+
+
+class TemporaryError(LLMError):
+    """Временный сбой (сеть, 5xx): можно повторить 1–2 раза, затем — следующий источник."""
+
+
+class PermanentError(LLMError):
+    """Ошибка, которая не пройдёт от повторов (неверный запрос, неподдерживаемая функция)."""
+
+
 class ProviderQuota(LLMError):
     """У источника кончился лимит (есть время сброса)."""
 
     def __init__(self, msg: str, reset_at: float | None = None):
         super().__init__(msg)
         self.reset_at = reset_at
+
+
+QuotaError = ProviderQuota
+
+
+class UserActionRequired(Exception):
+    """Нужен человек: вход в аккаунт, CAPTCHA, подтверждение. Производство ждёт команды «продолжить».
+    Не наследует LLMError — маршрутизатор источников не превращает это в «переключаюсь на следующий»."""
+
+    def __init__(self, message: str, url: str | None = None, provider: str | None = None):
+        super().__init__(message)
+        self.message, self.url, self.provider = message, url, provider
 
 
 class NoProviderLeft(LLMError):
@@ -78,6 +109,18 @@ def sleep(seconds: float) -> None:
     """Прерываемое ожидание: «Остановить» срабатывает мгновенно."""
     if CANCEL.wait(max(0.0, seconds)):
         raise StopRequested()
+
+
+def _provider_of(text: str) -> str | None:
+    """Имя источника из текста ошибки: «Ollama: …», «Groq (…): …», «Gemini не ответил…»."""
+    low = text.lower()
+    for key, name in (("ollama", "Ollama"), ("groq", "Groq"), ("openrouter", "OpenRouter"), ("mistral", "Mistral"),
+                      ("cerebras", "Cerebras"), ("gemini в браузере", "Gemini в браузере"), ("ai studio", "AI Studio"),
+                      ("pollinations", "Pollinations"), ("comfyui", "ComfyUI"), ("flow", "Google Flow"), ("piper", "Piper"),
+                      ("gemini", "Gemini API")):
+        if key in low:
+            return name
+    return None
 
 
 def humanize(exc: BaseException) -> dict:
@@ -104,15 +147,19 @@ def humanize(exc: BaseException) -> dict:
     if isinstance(exc, RegionBlocked):
         return {"title": "Gemini API недоступен из вашего региона",
                 "fix": "Включите VPN (страна, где работает Gemini API) и нажмите «Продолжить проект».", "detail": text}
+    if isinstance(exc, UserActionRequired):
+        return {"title": "Требуется ваше действие", "fix": exc.message + " Затем напишите «продолжить» (или нажмите «Продолжить»).",
+                "detail": text}
+    src = getattr(exc, "provider", None) or _provider_of(text)
     if isinstance(exc, LLMTimeout):
-        return {"title": "Gemini не ответил вовремя",
+        return {"title": f"{src or 'Источник'} не ответил вовремя",
                 "fix": "Проверьте интернет/VPN и нажмите «Продолжить проект» — работа продолжится с того же места.",
                 "detail": text}
     if isinstance(exc, ModelUnavailable):
         return {"title": "Нужная модель Gemini недоступна для ваших ключей",
                 "fix": "Нажмите «Проверить систему» — список моделей обновится автоматически.", "detail": text}
     if isinstance(exc, BadResponse):
-        return {"title": "Gemini вернул пустой или испорченный ответ",
+        return {"title": f"{src or 'Источник'} вернул пустой или испорченный ответ",
                 "fix": "Нажмите «Продолжить проект» — шаг будет повторён.", "detail": text}
     if isinstance(exc, StageStalled):
         return {"title": "Шаг завис и был перезапущен сторожем", "fix": "Ничего делать не нужно.", "detail": text}

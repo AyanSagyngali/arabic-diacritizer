@@ -33,7 +33,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.delenv("FACTORY_MOCK_HW", raising=False)
     for k in SECRETS:
         monkeypatch.delenv(k, raising=False)
+    from factory.core import status
     from factory.llm.gemini import reset_client
+    status.reset()
     reset_client()
     cfg = C.load_config()
     cfg["paths"]["projects"] = str(tmp_path / "projects")
@@ -285,45 +287,180 @@ def test_internet_down_text_error_is_clear(isolated, monkeypatch):
 
 
 # ======================= текст: Ollama =======================
-def test_ollama_not_running_is_detected_fast(isolated, monkeypatch):
+class FakeOllama:
+    """Настоящий HTTP-сервер с API Ollama (/api/tags, потоковый /api/chat, /api/generate) — без самой модели."""
+
+    def __init__(self, models=("qwen3:4b",), reply='{"title": "Тест"}', delay=0.0, silent_after=None):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.bodies: list[dict] = []
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def _json(self, obj, code=200):
+                b = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_GET(self):  # noqa: N802
+                self._json({"models": [{"name": m, "size": int(2.5 * 2 ** 30)} for m in models]})
+
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+                outer.bodies.append(body)
+                if self.path == "/api/generate":
+                    return self._json({"response": "готов", "eval_count": 20, "eval_duration": int(2e9), "load_duration": int(1e9)})
+                if body.get("model") not in models:
+                    return self._json({"error": "model not found"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                pieces = [reply[i:i + 4] for i in range(0, len(reply), 4)]
+                for i, piece in enumerate(pieces):
+                    if silent_after is not None and i >= silent_after:
+                        time.sleep(30)
+                        return
+                    time.sleep(delay)
+                    self.wfile.write((json.dumps({"message": {"content": piece}, "done": False}) + "\n").encode())
+                    self.wfile.flush()
+                self.wfile.write((json.dumps({"message": {"content": ""}, "done": True, "eval_count": len(pieces),
+                                              "eval_duration": int(1e9)}) + "\n").encode())
+
+            def log_message(self, *a):
+                pass
+        self.port = free_port()
+        self.srv = ThreadingHTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.port}"
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def _use_ollama(isolated, fake):
+    from factory.core import status
+    status.reset()
+    isolated["providers"]["opts"]["ollama_url"] = fake.url
+
+
+def test_ollama_not_installed_is_skipped_silently(isolated, monkeypatch):
     real_mode(monkeypatch)
     isolated["providers"]["opts"]["ollama_url"] = f"http://127.0.0.1:{free_port()}"
+    from factory.core import status
+    from factory.core.errors import NotConfigured
     from factory.providers import install
+    status.reset()
     monkeypatch.setattr(install, "ollama_exe", lambda: None)
     from factory.providers.text import OllamaText
     t = time.time()
+    with pytest.raises(NotConfigured):
+        OllamaText().available()
+    assert time.time() - t < 5
+
+
+def test_ollama_installed_but_not_running(isolated, monkeypatch):
+    real_mode(monkeypatch)
+    isolated["providers"]["opts"]["ollama_url"] = f"http://127.0.0.1:{free_port()}"
+    from factory.core import status
+    from factory.providers import install, ollama
+    status.reset()
+    monkeypatch.setattr(install, "ollama_exe", lambda: "/nonexistent/ollama")
+    monkeypatch.setattr(ollama, "start_server", lambda: False)
+    from factory.providers.text import OllamaText
     ok, why = OllamaText().available()
-    assert not ok and "Ollama" in why and time.time() - t < 5
+    assert not ok and "Ollama" in why
 
 
-def test_ollama_chat_with_schema(isolated, monkeypatch):
+def test_ollama_streams_json_with_auto_ctx(isolated, monkeypatch):
     real_mode(monkeypatch)
-    sent = {}
+    fake = FakeOllama(models=("qwen3:4b",), reply='{"title": "Тест"}')
+    try:
+        _use_ollama(isolated, fake)
+        from factory.core import events
+        from factory.core.status import monitor
+        monitor().put("hw", {"gpu": "RTX 2050", "vram_gb": 4.0, "cuda": True, "ram_gb": 15.7})
+        seen = []
+        events.add_listener(lambda ev: seen.append(ev) if ev["kind"] == "llm_progress" else None)
+        from factory.llm.gemini import S
+        from factory.providers.text import OllamaText
+        o = OllamaText()
+        assert o.available() == (True, "")
+        obj, _ = o.generate_json_ex("Дай заголовок", schema=S("object", props={"title": S("string")}), cache=False,
+                                    max_tokens=512)
+        assert obj == {"title": "Тест"}
+        chat = [b for b in fake.bodies if "messages" in b][-1]
+        assert chat["model"] == "qwen3:4b" and chat["stream"] is True and chat["think"] is False
+        assert chat["options"]["num_ctx"] <= 8192, "на 4 ГБ видеопамяти контекст не больше 8192"
+        assert chat["format"]["type"] == "object"
+        assert seen and seen[-1]["data"]["model"] == "qwen3:4b"
+        from factory.providers.limits import limits
+        assert any(r["provider"] == "ollama" and r["unlimited"] for r in limits().summary())
+    finally:
+        fake.close()
 
-    def h(req):
-        if req.url.path == "/api/tags":
-            return httpx.Response(200, json={"models": [{"name": "qwen3:8b"}]})
-        sent.update(json.loads(req.content))
-        return httpx.Response(200, json={"message": {"content": '{"title": "Тест"}'}})
-    from factory.llm.gemini import S
-    from factory.providers.text import OllamaText
-    o = OllamaText(http=transport(h))
-    assert o.available() == (True, "")
-    obj, _ = o.generate_json_ex("Дай заголовок", schema=S("object", props={"title": S("string")}), cache=False)
-    assert obj == {"title": "Тест"}
-    assert sent["model"] == "qwen3:8b" and sent["think"] is False and sent["format"]["type"] == "object"
-    from factory.providers.limits import limits
-    assert any(r["provider"] == "ollama" and r["unlimited"] for r in limits().summary())
 
-
-def test_ollama_missing_model(isolated, monkeypatch):
+def test_ollama_never_uses_missing_model(isolated, monkeypatch):
+    """В настройках qwen3:8b, установлена только qwen3:4b → используется qwen3:4b (раньше: «нет модели qwen3:8b»)."""
     real_mode(monkeypatch)
+    fake = FakeOllama(models=("qwen3:4b", "nomic-embed-text"), reply="Привет")
+    try:
+        _use_ollama(isolated, fake)
+        isolated["providers"]["opts"]["ollama_model"] = "qwen3:8b"
+        from factory.providers.text import OllamaText
+        o = OllamaText()
+        assert o.available() == (True, "")
+        assert o.model_name() == "qwen3:4b"
+        text, _ = o.generate_ex("Скажи привет", cache=False, max_tokens=32)
+        assert text == "Привет"
+        assert [b for b in fake.bodies if "messages" in b][-1]["model"] == "qwen3:4b"
+    finally:
+        fake.close()
 
-    def h(req):
-        return httpx.Response(200, json={"models": [{"name": "llama3:8b"}]})
-    from factory.providers.text import OllamaText
-    ok, why = OllamaText(http=transport(h)).available()
-    assert not ok and "qwen3:8b" in why
+
+def test_ollama_no_models_at_all(isolated, monkeypatch):
+    real_mode(monkeypatch)
+    fake = FakeOllama(models=())
+    try:
+        _use_ollama(isolated, fake)
+        from factory.providers.text import OllamaText
+        ok, why = OllamaText().available()
+        assert not ok and "нет ни одной модели" in why
+    finally:
+        fake.close()
+
+
+def test_ollama_silence_is_bounded(isolated, monkeypatch):
+    """Модель замолчала посреди ответа → понятная ошибка за ollama_idle_seconds, а не бесконечное ожидание."""
+    real_mode(monkeypatch)
+    fake = FakeOllama(models=("qwen3:4b",), reply="Длинный ответ " * 10, silent_after=3)
+    try:
+        _use_ollama(isolated, fake)
+        isolated["llm"]["ollama_idle_seconds"] = 2
+        isolated["llm"]["ollama_first_token_seconds"] = 2
+        from factory.providers.text import OllamaText
+        t = time.time()
+        with pytest.raises(LLMTimeout) as e:
+            OllamaText().generate_ex("x", cache=False, max_tokens=64)
+        assert time.time() - t < 10 and "Ollama" in str(e.value)
+        from factory.core.errors import humanize
+        assert humanize(e.value)["title"].startswith("Ollama"), "ошибка называет настоящий источник, а не Gemini"
+    finally:
+        fake.close()
+
+
+def test_select_model_rules():
+    from factory.providers.ollama import auto_ctx, select_model
+    inst = [{"name": "qwen3:4b", "size_gb": 2.5}, {"name": "gemma3:4b", "size_gb": 3.3}, {"name": "qwen3:32b", "size_gb": 20}]
+    hw4 = {"vram_gb": 4, "cuda": True, "ram_gb": 15.7}
+    assert select_model(inst, "qwen3:8b", hw4)[0] == "qwen3:4b"
+    assert select_model(inst, "gemma3:4b", hw4)[0] == "gemma3:4b"
+    assert select_model(inst, "", {"vram_gb": 24, "cuda": True, "ram_gb": 64})[0] == "qwen3:32b"
+    assert select_model([], "qwen3:4b", hw4)[0] is None
+    assert auto_ctx("qwen3:4b", hw4, 2.5) in (4096, 6144, 8192)
+    assert auto_ctx("qwen3:14b", {"vram_gb": 24, "cuda": True}, 9) >= 16384
 
 
 def test_text_router_falls_back_from_gemini_to_groq(isolated, monkeypatch):
@@ -371,7 +508,11 @@ def test_edge_is_marked_unofficial_and_not_default():
     for part in ("voice", "images"):
         assert "none" in CATALOG[part], "у озвучки и кадров есть «Нет — пропустить»"
     badges = {i.badge for p in CATALOG.values() for i in p.values()}
-    assert badges <= {"free", "key", "sub", "paid", "unofficial"}
+    assert badges <= {"local", "free", "key", "sub", "paid", "unofficial", "screen", "skip"}
+    for p in CATALOG.values():  # «∞» — только у локальных; у онлайн-сервисов с квотой — честная пометка
+        for i in p.values():
+            assert ("∞" not in i.public()["badge_text"]) or i.local
+    assert "none" not in DEFAULT_CHAINS["images"] and "none" not in DEFAULT_CHAINS["voice"], "«Нет» — только осознанно"
 
 
 def test_numbers_to_words_for_local_voices():
@@ -490,7 +631,9 @@ def test_images_chain_ends_with_title_cards(isolated, monkeypatch):
 
 # ======================= железо и «Рекомендовать» =======================
 @pytest.mark.parametrize("hw,text0,img0,model", [
-    ({"gpu": None, "vram_gb": 0, "cuda": False, "ram_gb": 8, "gpus": []}, "gemini", "pollinations", "qwen3:4b"),
+    ({"gpu": None, "vram_gb": 0, "cuda": False, "ram_gb": 8, "gpus": []}, "gemini", "gemini_api", "qwen3:4b"),
+    ({"gpu": "RTX 2050", "vram_gb": 4, "cuda": True, "ram_gb": 15.7, "gpus": [{"vendor": "nvidia"}]}, "gemini", "gemini_api",
+     "qwen3:4b"),
     ({"gpu": "RTX 3060", "vram_gb": 12, "cuda": True, "ram_gb": 32, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:14b"),
     ({"gpu": "RTX 4090", "vram_gb": 24, "cuda": True, "ram_gb": 64, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:32b"),
     ({"gpu": "RTX 3070", "vram_gb": 8, "cuda": True, "ram_gb": 16, "gpus": [{"vendor": "nvidia"}]}, "ollama", "comfyui", "qwen3:8b"),
@@ -499,9 +642,12 @@ def test_recommend_by_hardware(isolated, hw, text0, img0, model):
     from factory.providers.recommend import recommend
     r = recommend(hw)
     assert r["chains"]["text"][0] == text0
-    assert r["chains"]["images"][0] == img0 and r["chains"]["images"][-1] == "none"
-    assert r["chains"]["voice"][0] in ("silero", "piper")
-    assert r["opts"].get("ollama_model") == model
+    assert r["chains"]["images"][0] == img0 and "none" not in r["chains"]["images"]
+    assert "piper" in r["chains"]["voice"]
+    from factory.providers.recommend import ollama_model_for
+    assert ollama_model_for(hw) == model
+    if hw["vram_gb"] < 8:
+        assert "comfyui" not in r["chains"]["images"], "на слабой видеокарте локальные картинки не рекомендуются"
     assert all(r["why"].values())
     if hw["vram_gb"] >= 12:
         assert r["opts"]["comfy_model"] == "flux-schnell"
@@ -549,6 +695,72 @@ def test_settings_chains_save_and_migrate(isolated):
     assert isolated.at("voice.provider") == "piper" and isolated.at("voice.piper_voice") == "ru_RU-irina-medium"
     with pytest.raises(ValueError):
         settings.save(isolated, {"chains": {"voice": ["nope"]}})
+
+
+def test_recommendation_never_removes_user_choice(isolated):
+    """Раньше установщик делал settings.save(recommend()) — и Flow пропадал. Теперь ручной выбор сохраняется."""
+    from factory import settings
+    from factory.providers.recommend import recommend
+    settings.save(isolated, {"chains": {"images": ["flow", "pollinations"], "voice": ["piper"]}})
+    rec = recommend({"gpu": "RTX 2050", "vram_gb": 4, "cuda": True, "ram_gb": 15.7, "gpus": [{"vendor": "nvidia"}]})
+    s = settings.apply_recommendation(isolated, rec)
+    assert s["chains"]["images"][:2] == ["flow", "pollinations"], "Flow остаётся первым"
+    assert s["chains"]["voice"][0] == "piper"
+    assert set(rec["chains"]["images"]) <= set(s["chains"]["images"]), "рекомендованные добавлены запасными"
+    assert s["chains"]["text"] == rec["chains"]["text"], "нетронутая часть берётся из рекомендации"
+
+
+def test_flow_subscription_flag_puts_flow_first(isolated):
+    from factory import settings
+    s = settings.save(isolated, {"opts": {"flow_subscription": "1"}})
+    assert s["chains"]["images"][0] == "flow"
+    rec = {"chains": {"images": ["gemini_api", "pollinations"]}, "opts": {}}
+    s = settings.apply_recommendation(isolated, rec)
+    assert s["chains"]["images"][0] == "flow"
+
+
+def test_modes_background_screen_hybrid(isolated):
+    from factory import settings
+    settings.save(isolated, {"chains": {"text": ["gemini", "ollama", "gemini_web"], "voice": ["gemini", "aistudio", "piper"]}})
+    settings.save(isolated, {"opts": {"mode_text": "background", "mode_voice": "screen"}})
+    ch = isolated["providers"]["chains"]
+    assert ch["text"] == ["gemini", "ollama"], "фон: без экранных"
+    assert ch["voice"] == ["aistudio", "gemini", "piper"], "экран: экранные первыми, остальные — запасные"
+    settings.save(isolated, {"opts": {"mode_text": "hybrid"}})
+    assert isolated["providers"]["chains"]["text"] == ["gemini", "ollama", "gemini_web"]
+    with pytest.raises(ValueError):
+        settings.save(isolated, {"opts": {"mode_text": "turbo"}})
+
+
+def test_screen_providers_need_ack(isolated):
+    from factory.llm.gemini import llm, reset_client
+    isolated["providers"]["chains"]["text"] = ["gemini_web"]
+    reset_client()
+    with pytest.raises(NoProviderLeft) as e:
+        llm().generate("x", cache=False)
+    assert "не настроен" in str(e.value)
+    isolated["providers"]["opts"]["screen_ack"] = "1"
+    reset_client()
+    assert llm().generate("x", cache=False)
+
+
+def test_unconfigured_providers_do_not_pollute_errors(isolated):
+    """Groq/OpenRouter без ключей пропускаются молча; в ошибке — только реальная причина."""
+    from factory.llm.gemini import llm, reset_client
+    reset_client()
+    tr = llm()
+    isolated["providers"]["chains"]["text"] = ["groq", "openrouter", "ollama"]
+    groq, orr = Fake("groq", result="g"), Fake("openrouter", result="o")
+    groq.configured = lambda: False
+    orr.configured = lambda: False
+    oll = Fake("ollama", exc=LLMTimeout("Ollama (qwen3:4b) молчит дольше 90 с"))
+    for f in (groq, orr, oll):
+        f.generate_ex = f.run
+        tr.router.overrides[f.pid] = f
+    with pytest.raises(NoProviderLeft) as e:
+        tr.generate("x")
+    msg = str(e.value)
+    assert "Groq" not in msg and "OpenRouter" not in msg and "Ollama" in msg
 
 
 def test_text_ready_rules(isolated, monkeypatch):
@@ -799,7 +1011,7 @@ def test_api_providers_roundtrip(client, isolated):
     assert json.loads((isolated.path("data") / "settings.json").read_text(encoding="utf-8"))["opts"]["piper_voice"] == "ru_RU-dmitri-medium"
     assert client.post("/api/providers", json={"chains": {"voice": ["nope"]}}).status_code == 400
     rec = client.post("/api/providers/recommend", json={"part": "images", "apply": True}).json()
-    assert rec["chains"]["images"][-1] == "none" and rec["snapshot"]["settings"]["chains"]["images"] == rec["chains"]["images"]
+    assert "none" not in rec["chains"]["images"] and rec["snapshot"]["settings"]["chains"]["images"] == rec["chains"]["images"]
     assert client.get("/api/hw").json()["text"]
     assert client.post("/api/providers/install/unknown").status_code == 400
 
@@ -1027,3 +1239,132 @@ def test_real_installer_edge_tts(isolated, monkeypatch):
     st = wait_install("edge", 300)
     assert st.get("error") is None, st
     assert install.status()["edge"]["installed"]
+
+
+# ======================= режимы × «Нет», свои файлы, монтаж без ChatCut =======================
+@pytest.mark.parametrize("mode", ["background", "screen", "hybrid"])
+@pytest.mark.parametrize("voice_none", [False, True])
+@pytest.mark.parametrize("images_none", [False, True])
+def test_modes_with_none_reach_done(isolated, mode, voice_none, images_none):
+    from factory import settings
+    from factory.llm.gemini import reset_client
+    settings.save(isolated, {"chains": {"text": ["gemini", "ollama", "gemini_web"],
+                                        "voice": ["none"] if voice_none else ["gemini", "aistudio", "piper"],
+                                        "images": ["none"] if images_none else ["flow", "gemini_api", "pollinations"]},
+                             "opts": {"mode_text": mode, "mode_voice": mode, "mode_images": mode, "screen_ack": "1"}})
+    reset_client()
+    p = run_project()
+    assert p.data["status"] == "done", (p.data.get("last_error"), p.data.get("result", {}).get("errors"))
+    r = p.data["result"]
+    if mode == "screen":
+        assert r["text_providers"][0] == "gemini_web"
+        if not voice_none:
+            assert r["voice_providers"] == ["aistudio"]
+    if mode == "background":
+        assert "gemini_web" not in r.get("text_providers", [])
+    assert (p.root / "state.json").exists() and (p.root / "manifest.json").exists()
+
+
+def test_own_files_are_used(isolated):
+    """Свои картинки (04_images/import/001.png) и одна своя озвучка на весь текст (05_voice/import/*.wav)."""
+    import numpy as np
+
+    from factory.core.pipeline import Runner
+    from factory.core.project import Project
+    from factory.media import audio as A
+    from factory.topics.engine import custom
+    p = Project.create(custom("Свои файлы"), 1)
+    r = Runner()
+    r.run_sync(p, from_stage=None) if False else None
+    # сначала только до промтов: знаем номера кадров и текст
+    for k in ("images", "voice", "materials", "edit", "verify"):
+        p.set_stage(k, "done", "")
+    r.run_sync(p)
+    for k in ("images", "voice", "materials", "edit", "verify"):
+        p.set_stage(k, "pending", "")
+    (p.images_dir / "import").mkdir(exist_ok=True)
+    (p.images_dir / "import" / "001.png").write_bytes(png_bytes(1600, 900, (10, 60, 90)))
+    for f in p.images_dir.glob("0*.png"):
+        f.unlink()
+    (p.images_dir / "images_state.json").unlink(missing_ok=True)
+    (p.voice_dir / "import").mkdir(exist_ok=True)
+    words = sum(len(s["text"].split()) for s in __import__("json").loads((p.script_dir / "script.json").read_text("utf-8"))["sentences"])
+    secs = max(20.0, words / 2.5)
+    A.write_wav(p.voice_dir / "import" / "moya_ozvuchka.wav", A.synth_speech_like(secs, 24000, seed=5), 24000)
+    r.run_sync(p)
+    assert p.data["status"] == "done", p.data.get("last_error")
+    st = __import__("json").loads((p.images_dir / "images_state.json").read_text("utf-8"))
+    assert st["001"]["backend"] == "files"
+    assert p.data["result"]["voice_providers"] == ["files"]
+    a, rate = A.read_wav(p.voice_dir / "master_voice.wav")
+    assert abs(len(a) / rate - secs) < secs * 0.25
+
+
+def test_chatcut_unavailable_gives_local_video_and_honest_report(isolated, monkeypatch):
+    from factory.chatcut.mcp_client import ChatCutError
+    from factory.stages import edit
+    isolated["chatcut"]["enabled"] = True
+    monkeypatch.setattr(edit, "mock_mode", lambda: False)
+
+    def no_mcp(ctx, plan, cc):
+        raise ChatCutError("нет подключения к ChatCut MCP")
+    monkeypatch.setattr(edit, "_mcp", no_mcp)
+    p = run_project()
+    assert p.data["status"] == "done", p.data.get("last_error")
+    r = p.data["result"]
+    assert p.data["chatcut"]["mode"] == "local"
+    assert "НЕ выполнен" in r["montage_note"] and r["export_local"]
+    rep = (p.export_dir / "REPORT.txt").read_text(encoding="utf-8")
+    assert "ChatCut НЕ выполнен" in rep
+
+
+def test_title_cards_fallback_is_flagged(isolated):
+    """Если кадры пришлось заменить карточками — это видно в отчёте (не «ложный успех»)."""
+    from factory.llm.gemini import reset_client
+    from factory.providers import images
+    isolated["providers"]["chains"]["images"] = ["gemini_api", "none"]
+    isolated["providers"]["user_chains"] = {"images": ["gemini_api", "none"]}
+    reset_client()
+    f = Fake("gemini_api", exc=AllKeysExhausted(time.time() + 3600, 2, 2, 0))
+    f.generate = f.run
+    images.router().overrides["gemini_api"] = f
+    p = run_project()
+    assert p.data["status"] == "done"
+    assert p.data["result"]["title_cards"] > 0
+    assert any("титульные карточки" in e for e in p.data["result"]["errors"])
+
+
+def test_topics_offline_bank_when_ai_fails(isolated, monkeypatch):
+    from factory.llm.gemini import llm
+    from factory.topics import engine
+
+    def fail(*a, **kw):
+        raise NoProviderLeft("text", ["Gemini API: квота", "Ollama: не запущена"])
+    monkeypatch.setattr(type(llm()), "generate_json", lambda self, *a, **kw: fail())
+    assert engine.refresh_async()
+    t = time.time()
+    while engine.status()["running"] and time.time() - t < 30:
+        time.sleep(0.1)
+    st = engine.status()
+    assert st["error"] and "списка канала" in st["fix"]
+    topics = engine.cached()["topics"]
+    assert len(topics) >= 5 and all(t["offline"] for t in topics)
+    done = " ".join(__import__("yaml").safe_load(open(isolated.at("paths.channel_profile"), encoding="utf-8"))["published_topics"])
+    assert all(t["title"] not in done for t in topics)
+
+
+def test_status_monitor_is_non_blocking(isolated, monkeypatch):
+    """Панель не ждёт медленных проверок: пока монитор считает, get() сразу возвращает значение по умолчанию."""
+    from factory.core import status
+    status.reset()
+    m = status.monitor()
+
+    def slow():
+        time.sleep(5)
+        return {"running": True, "models": []}
+    monkeypatch.setitem(status.Monitor.ITEMS, "ollama", (slow, 10.0))
+    m.start()
+    t = time.time()
+    assert m.get("ollama", {"checking": True}) == {"checking": True}
+    assert time.time() - t < 0.5
+    status.reset()

@@ -183,6 +183,12 @@ class Project:
     def save(self) -> None:
         with self._lock:
             write_json(self.file, self.data)
+            st = self.data.get("stages", {})
+            write_json(self.root / "state.json", {  # краткое состояние для людей и внешних инструментов
+                "topic": self.data.get("title"), "status": self.data.get("status"), "stage": self.data.get("current_stage"),
+                "completed": {k: (st.get(k) or {}).get("status") == "done" for k in STAGE_KEYS},
+                "last_completed_stage": next((k for k in reversed(STAGE_KEYS) if (st.get(k) or {}).get("status") == "done"), None),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, backup=False, durable=False)
         self.emit()
 
     def emit(self) -> None:

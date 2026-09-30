@@ -71,10 +71,12 @@ def selftest() -> int:
 
 SMOKE_MODES = {
     # «всё без ключей»: локальные модели + бесплатные сервисы; в конце — титульные карточки, чтобы ролик собрался всегда
-    "keyless": {"text": ["ollama"], "voice": ["piper", "silero", "none"], "images": ["comfyui", "pollinations", "none"]},
+    "keyless": {"text": ["ollama"], "voice": ["piper", "silero"], "images": ["comfyui", "pollinations"]},
     # «Gemini + запасные»: ключи Google, при лимите — бесплатные API и локальные источники
     "gemini": {"text": ["gemini", "groq", "openrouter", "ollama"], "voice": ["gemini", "piper", "silero"],
                "images": ["gemini_api", "pollinations", "none"]},
+    # «как у меня»: 4 ГБ видеопамяти — Ollama (лучшая установленная), Piper, Flow по подписке (+ Pollinations в запасе)
+    "mypc": {"text": ["ollama", "gemini"], "voice": ["piper"], "images": ["flow", "pollinations"]},
 }
 
 

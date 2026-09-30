@@ -14,6 +14,18 @@ _lock = threading.Lock()
 _subs: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
 _seq = itertools.count(1)
 _last: dict[str, dict] = {}
+_listeners: list = []  # синхронные слушатели (терминал): вызываются в потоке публикации, должны быть быстрыми
+
+
+def add_listener(fn) -> None:
+    with _lock:
+        _listeners.append(fn)
+
+
+def remove_listener(fn) -> None:
+    with _lock:
+        if fn in _listeners:
+            _listeners.remove(fn)
 
 
 def publish(kind: str, data: dict | None = None) -> None:
@@ -22,6 +34,12 @@ def publish(kind: str, data: dict | None = None) -> None:
         _last[kind] = ev
     with _lock:
         subs = list(_subs)
+        listeners = list(_listeners)
+    for fn in listeners:
+        try:
+            fn(ev)
+        except Exception:  # noqa: BLE001 — слушатель не должен ломать публикацию
+            pass
     for loop, q in subs:
         try:
             loop.call_soon_threadsafe(_put, q, ev)

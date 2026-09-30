@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import numpy as np
 
 from ..core import events
-from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested
+from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested, UserActionRequired
 from ..core.errors import sleep as err_sleep
 from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
@@ -68,6 +69,74 @@ def check_chunk(path, text: str, wpm: float, allow_silent: bool = False) -> tupl
     return True, "ok", d
 
 
+AUDIO_EXT = (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm")
+
+
+def _decode_any(path: Path) -> tuple[np.ndarray, int]:
+    if path.suffix.lower() == ".wav":
+        try:
+            return A.read_wav(path)
+        except Exception:  # noqa: BLE001 — нестандартный WAV → через ffmpeg
+            pass
+    from ..providers.voice import _decode_to_pcm
+    pcm = _decode_to_pcm(path, 24000)
+    return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0, 24000
+
+
+def import_own_voice(ctx, chunks: list[dict], vdir: Path, state: dict) -> None:
+    """«Свой файл»: готовая озвучка в 05_voice/import/.
+    - voice_001.wav, voice_002.mp3 … — по частям;
+    - один файл (например из AI Studio) на весь текст — режется на части по паузам рядом с расчётными границами."""
+    imp = vdir / "import"
+    imp.mkdir(exist_ok=True)
+    files = sorted(x for x in imp.iterdir() if x.suffix.lower() in AUDIO_EXT)
+    if not files:
+        return
+    by_stem = {x.stem: x for x in files}
+    matched = [c for c in chunks if Path(c["file"]).stem in by_stem]
+    todo = [c for c in chunks if state.get(c["chunk_id"], {}).get("provider") != "files"]
+    if not todo:
+        return
+    if matched:
+        for c in matched:
+            if state.get(c["chunk_id"], {}).get("provider") == "files":
+                continue
+            a, rate = _decode_any(by_stem[Path(c["file"]).stem])
+            if A.is_silent(a, rate):
+                ctx.log.warn(f"Свой файл {c['file']}: тишина — пропускаю", "voice")
+                continue
+            A.write_wav(vdir / c["file"], a, rate)
+            state[c["chunk_id"]] = {"status": "done", "duration": round(len(a) / rate, 3), "provider": "files"}
+            ctx.log.log(f"Voice chunk {c['file']} ✓ (свой файл)", "voice")
+        write_json(vdir / "voice_state.json", state)
+        return
+    if len(files) != 1:
+        ctx.log.warn("В 05_voice/import несколько файлов без имён voice_NNN — положите один файл на весь текст "
+                     "или назовите файлы voice_001, voice_002…", "voice")
+        return
+    a, rate = _decode_any(files[0])
+    if A.is_silent(a, rate):
+        ctx.log.warn(f"Свой файл {files[0].name}: тишина — пропускаю", "voice")
+        return
+    weights = [max(1, len(c["text"].split())) for c in chunks]
+    total_w, total = sum(weights), len(a)
+    win = int(rate * 0.2)
+    energy = np.convolve(np.abs(a), np.ones(win) / win, mode="same") if total > win else np.abs(a)
+    cuts, cum = [0], 0
+    for w in weights[:-1]:
+        cum += w
+        target = int(total * cum / total_w)
+        lo, hi = max(cuts[-1] + win, target - int(rate * 4)), min(total - win, target + int(rate * 4))
+        cut = int(lo + np.argmin(energy[lo:hi])) if hi > lo else target
+        cuts.append(cut)
+    cuts.append(total)
+    for c, s0, s1 in zip(chunks, cuts, cuts[1:]):
+        A.write_wav(vdir / c["file"], a[s0:s1], rate)
+        state[c["chunk_id"]] = {"status": "done", "duration": round((s1 - s0) / rate, 3), "provider": "files"}
+    write_json(vdir / "voice_state.json", state)
+    ctx.log.log(f"Voice: свой файл {files[0].name} ({total / rate:.1f} с) разрезан на {len(chunks)} частей по паузам", "voice")
+
+
 def run(ctx) -> None:
     p = ctx.project
     cfg = ctx.cfg
@@ -87,8 +156,11 @@ def run(ctx) -> None:
     lock = threading.Lock()
     direction = f"{vc['direction'].strip()} Стиль: {vc['style']}. Прочитай вслух следующий текст:"
 
+    import_own_voice(ctx, chunks, vdir, state)
     todo = []
     for c in chunks:  # уже готовые части (после перезапуска) проверяются, а не генерируются заново
+        if state.get(c["chunk_id"], {}).get("provider") == "files" and (vdir / c["file"]).exists():
+            continue
         prov = state.get(c["chunk_id"], {}).get("provider", "gemini")
         ok, _, d = check_chunk(vdir / c["file"], c["text"], wpm, allow_silent=prov == "none")
         if ok:
@@ -111,7 +183,7 @@ def run(ctx) -> None:
                 if ok:
                     return d, used
                 ctx.log.warn(f"Voice chunk {c['chunk_id']} rejected ({used}): {last}", "voice")
-            except (StopRequested, StageStalled, RegionBlocked):
+            except (StopRequested, StageStalled, RegionBlocked, UserActionRequired):
                 raise
             except NoProviderLeft as e:
                 last = str(e)
@@ -144,7 +216,7 @@ def run(ctx) -> None:
 
     # один голос на весь ролик: если источник сменился посреди работы — переозвучить части другим голосом
     used = {state[c["chunk_id"]].get("provider") or "gemini" for c in chunks}
-    if len(used) > 1 and str(ctx.cfg.at("providers.opts.voice_uniform", "1")) == "1":
+    if len(used) > 1 and "files" not in used and str(ctx.cfg.at("providers.opts.voice_uniform", "1")) == "1":
         ready = [pid for pid in r.chain() if not r.cooling(pid)]  # тот, кто сейчас доступен (не в лимите)
         target = next((pid for pid in ready if pid in used), None) or (ready[0] if ready else sorted(used)[0])
         redo = [c for c in chunks if state[c["chunk_id"]].get("provider") != target]
@@ -152,7 +224,7 @@ def run(ctx) -> None:
         p.progress("voice", len(chunks) - len(redo), len(chunks), f"Единый голос: переозвучиваю {len(redo)} частей ({target})…")
         try:
             parallel_map(lambda c: one(c, only=target), redo, workers("voice", 4), on_result=saved, check=ctx.check_stop)
-        except (StopRequested, StageStalled):
+        except (StopRequested, StageStalled, UserActionRequired):
             raise
         except Exception as e:  # не удалось — оставляем смешанные голоса, но не теряем ролик
             ctx.log.warn(f"Voice: could not unify voice ({e}); keeping mixed voices", "voice")

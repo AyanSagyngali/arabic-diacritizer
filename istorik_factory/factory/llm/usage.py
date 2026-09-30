@@ -100,6 +100,7 @@ class Usage:
         msg = str(err.get("message", "")).lower()
         if "per day" in msg or "perday" in msg:
             daily = True
+        auto_project(key, body)
         with self._lock:
             self._roll()
             if value is not None:
@@ -178,6 +179,22 @@ def set_project_labels(mapping: dict[str, str]) -> dict[str, str]:
                 cur.pop(fp, None)
         write_json(_labels_path(), cur, backup=False)
         return cur
+
+
+def auto_project(key: str, body) -> None:
+    """Если Google назвал проект в ответе (consumer: projects/123…), подписать ключ автоматически —
+    но не трогать подпись, которую пользователь поставил сам."""
+    import json as _j
+    import re as _re
+    m = _re.search(r"projects/(\d{5,})", _j.dumps(body or {}, ensure_ascii=False))
+    if not m:
+        return
+    fp = fingerprint(key)
+    with _labels_lock:
+        cur = project_labels()
+        if fp not in cur:
+            cur[fp] = f"проект {m.group(1)[-6:]}"
+            write_json(_labels_path(), cur, backup=False)
 
 
 def same_project(key: str, all_keys: list[str]) -> list[str]:

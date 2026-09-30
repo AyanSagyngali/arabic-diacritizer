@@ -180,7 +180,12 @@ def run(ctx) -> None:
         parallel_map(write_chapter, todo, nw, on_result=saved, check=ctx.check_stop)
 
     # 3. финальная сверка сценария (pro) — только для длинных роликов
-    if minutes >= float(cfg.at("script.review_min_minutes", 5)) and not read_json(sdir / "review.json"):
+    from ..core.parallel import primary_of
+    primary = primary_of(g.router) if hasattr(g, "router") else "gemini"
+    # сверка моделью pro — дорогая по квоте: только если основной источник — Gemini API и ролик длинный
+    want_review = (minutes >= float(cfg.at("script.review_min_minutes", 10)) and primary in ("gemini", "gemini_paid")
+                   and bool(cfg.at("script.review", True)))
+    if want_review and not read_json(sdir / "review.json"):
         p.progress("script", 2, 4, "Редактор сверяет сценарий: повторы, переходы, факты…")
         full = "\n\n".join(f"[ГЛАВА {c['number']}: {c['title']}]\n{texts[str(c['number'])]}" for c in chapters)
         try:
@@ -259,7 +264,12 @@ def run(ctx) -> None:
     script = {"title": p.data["title"], "title_reveal": outline.get("title_reveal", {}),
               "chapters": [{"number": c["number"], "title": c["title"], "summary": c.get("summary", "")} for c in chapters],
               "word_count": sum(s["words"] for s in full), "sentences": full}
-    _validate(script, total_words)
+    try:
+        _validate(script, total_words)
+    except ValueError:  # не прошёл контроль качества → при повторе этапа главы пишутся заново
+        for f in ("chapters_text.json", "sentences_raw.json", "annotations.json", "review.json"):
+            (sdir / f).unlink(missing_ok=True)
+        raise
     write_json(sdir / "script.json", script)
     lines = []
     for ch in chapters:
@@ -284,9 +294,28 @@ def _clean(text: str) -> str:
 
 
 def _validate(script: dict, total_words: int) -> None:
-    if not script["sentences"]:
+    """Контроль качества сценария: не пустой, по-русски, достаточно длинный, без повторов, есть начало/развитие/финал."""
+    import re as _re
+    sents = script["sentences"]
+    if not sents:
         raise ValueError("сценарий пустой")
-    chapters = {s["chapter"] for s in script["sentences"]}
+    chapters = {s["chapter"] for s in sents}
     missing = [c["number"] for c in script["chapters"] if c["number"] not in chapters]
     if missing:
         raise ValueError(f"пустые главы: {missing}")
+    text = " ".join(s["text"] for s in sents)
+    letters = _re.findall(r"[A-Za-zА-Яа-яЁё]", text)
+    cyr = sum(1 for ch in letters if _re.match(r"[А-Яа-яЁё]", ch))
+    if letters and cyr / len(letters) < 0.7:
+        raise ValueError("сценарий написан не по-русски — будет переписан")
+    wc = sum(s["words"] for s in sents)
+    if wc < total_words * 0.35:
+        raise ValueError(f"сценарий слишком короткий: {wc} слов при цели {total_words}")
+    toks = text.lower().split()
+    grams = [" ".join(toks[i:i + 6]) for i in range(max(0, len(toks) - 5))]
+    if len(grams) > 60 and len(set(grams)) / len(grams) < 0.8:
+        raise ValueError("в сценарии много повторов — будет переписан")
+    order = [c["number"] for c in script["chapters"]]
+    by_ch = {n: sum(s["words"] for s in sents if s["chapter"] == n) for n in order}
+    if len(order) < 2 or by_ch[order[0]] < 15 or by_ch[order[-1]] < 15:
+        raise ValueError("в сценарии нет полноценного начала или финала")

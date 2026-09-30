@@ -11,3 +11,4 @@ logs/
 assets/
 .pytest_cache/
 tests/screenshots/
+START_ISTORIK.bat

@@ -43,8 +43,11 @@ PROMPT = """Ты — продюсер и контент-стратег исто�
 Свежие видео похожих исторических каналов (просмотры = спрос; НЕ копируй, ищи свой угол и мало раскрытые аспекты):
 {competitors}
 
-С помощью поиска Google найди, что сейчас обсуждают и ищут по истории в этой нише: годовщины ближайших месяцев, новые находки
-и исследования, фильмы/сериалы/игры на историческую тему, споры в медиа, популярные запросы.
+Годовщины ближайших недель по нише (из Википедии «В этот день»):
+{anniversaries}
+
+С помощью поиска (если он у тебя есть) найди, что сейчас обсуждают и ищут по истории в этой нише: годовщины ближайших месяцев,
+новые находки и исследования, фильмы/сериалы/игры на историческую тему, споры в медиа, популярные запросы.
 Предложи {count} сильных тем для документального ролика — разных по периодам и типам (государство, война, личность, трагедия,
 быт, загадка). Для каждой: название (грамотно, как заголовок YouTube), почему интересна сейчас, период, 3–6 основных событий,
 источники со ссылками, похожие видео конкурентов (если нашёл), почему подходит каналу, уникальный угол, рекомендуемая длительность
@@ -83,8 +86,69 @@ def _set(**kw) -> None:
     events.publish("topics_status", dict(_state))
 
 
+LOCAL_SCHEMA = S("array", items=S("object", props={
+    "title": S("string"), "why_interesting": S("string"), "period": S("string"), "key_events": strs(),
+    "angle": S("string"), "suggested_minutes": S("integer"), "score": S("integer")}))
+LOCAL_PROMPT = """Ты — продюсер исторического YouTube-канала «{channel}». Ниша: {niche}
+Сегодня {today}. Уже сделано (не повторяй): {published}
+Годовщины ближайших недель: {anniversaries}
+Предложи {count} разных сильных тем для документального ролика на русском: название как заголовок YouTube, почему интересно
+сейчас (1–2 предложения), период, 3–5 ключевых событий, уникальный угол, длительность в минутах (5–20), оценка 0–100.
+Ответ — только JSON-массив."""
+
+
 def max_seconds() -> float:
     return float(config().at("topics.max_seconds", 90))
+
+
+def _primary(provider: str | None = None) -> str | None:
+    if provider:
+        return provider
+    try:
+        from ..core.parallel import primary_of
+        return primary_of(llm().router)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def max_seconds_for(provider: str | None = None) -> float:
+    """Бюджет поиска тем зависит от источника: облако — 90 с; локальная модель и браузер — дольше (по железу)."""
+    from ..providers.catalog import CATALOG
+    pid = _primary(provider)
+    info = CATALOG["text"].get(pid or "")
+    if info and (info.local or info.screen):
+        return float(config().at("topics.local_max_seconds", 600))
+    return max_seconds()
+
+
+def offline_topics(count: int = 8, anniversaries: list[dict] | None = None) -> list[dict]:
+    """Темы без ИИ: запасной список канала (profile.yaml → topic_bank) минус уже сделанное, с учётом годовщин."""
+    prof = channel_profile()
+    done = " | ".join(list(prof.get("published_topics") or []) + [p["title"] for p in _projects()]).lower()
+    ann = anniversaries or []
+    out = []
+    for i, b in enumerate(prof.get("topic_bank") or []):
+        title = b.get("title", "")
+        if not title or title.lower() in done:
+            continue
+        words = {w for w in re.findall(r"[а-яёa-z]{5,}", (title + " " + " ".join(b.get("events") or [])).lower())}
+        hit = next((a for a in ann if any(w[:6] in a["text"].lower() for w in words)), None)
+        out.append({"id": f"bank_{i}", "title": title, "period": b.get("period", ""), "key_events": b.get("events") or [],
+                    "why_interesting": (f"{hit['date'][8:10]}.{hit['date'][5:7]} — {hit['years_ago']} лет: {hit['text'][:160]}"
+                                        if hit else "Тема из списка канала — подходит нише и ещё не выходила."),
+                    "suggested_minutes": b.get("minutes") or 10, "score": 70 + (15 if hit else 0) - i % 7,
+                    "sources": [], "competitor_videos": [], "fit": "Ядро ниши канала", "angle": "", "offline": True,
+                    "created": dt.datetime.now().isoformat(timespec="seconds")})
+    out.sort(key=lambda t: -t["score"])
+    return out[:count]
+
+
+def _projects() -> list[dict]:
+    try:
+        from ..core.project import Project
+        return Project.list_all()
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _alternatives(exclude: str | None) -> list[dict]:
@@ -118,24 +182,35 @@ def _refresh_safe(more: bool, provider: str | None = None, gen: int = 0) -> None
             box["error"] = e
 
     log.info("Поиск тем: старт%s", f" ({provider})" if provider else "")
+    budget = max_seconds_for(provider)
     t = threading.Thread(target=work, daemon=True, name="topics-work")
     t.start()
-    t.join(max_seconds() + 5)
+    t.join(budget + 5)
     if gen != _state["gen"]:
         return
     used = _used_provider()
+    err = fix = None
     if t.is_alive():
         _state["gen"] += 1  # поздний ответ уже не перезапишет список
-        err = f"Поиск тем не уложился в {max_seconds():.0f} с"
-        fix = "Источник текста отвечает слишком медленно. Нажмите «Искать через другой источник» или попробуйте позже."
-        log.warning("Поиск тем: превышено время")
-        _set(running=False, stage="", error=err, fix=fix, alternatives=_alternatives(provider or used))
-        events.toast(f"Поиск тем: {err}", "error", fix=fix)
+        from ..providers.catalog import CATALOG
+        name = CATALOG["text"].get(provider or used or _primary() or "", None)
+        err = f"Поиск тем не уложился в {budget:.0f} с" + (f" (источник: {name.label})" if name else "")
+        fix = "Источник текста отвечает слишком медленно. Выберите другой источник или попробуйте позже."
+        log.warning("Поиск тем: превышено время (%s)", name.label if name else "?")
     elif "error" in box:
         log.error("Поиск тем: ошибка: %s", box["error"])
         h = humanize(box["error"])
-        _set(running=False, stage="", error=h["title"], fix=h["fix"], alternatives=_alternatives(provider or used))
-        events.toast(f"Поиск тем: {h['title']}", "error", fix=h["fix"])
+        err, fix = h["title"], h["fix"]
+    if err:
+        c = cached()
+        if not c.get("topics"):  # темы есть всегда: без ИИ — из списка канала
+            bank = offline_topics(int(config().at("topics.count", 6)) + 2, _state.get("anniversaries"))
+            if bank:
+                write_json(config().path("data") / "topics.json", {"updated_at": None, "topics": bank, "offline": True})
+                events.publish("topics", {"count": len(bank)})
+                fix = (fix or "") + " Пока показаны темы из списка канала (без ИИ) — их можно выбрать сразу."
+        _set(running=False, stage="", error=err, fix=fix, alternatives=_alternatives(provider or used))
+        events.toast(f"Поиск тем: {err}", "error", fix=fix)
     else:
         log.info("Поиск тем: готово")
         _set(running=False, stage="", provider=used)
@@ -155,7 +230,7 @@ def refresh(more: bool = False, provider: str | None = None, gen: int | None = N
     chan = prof["channel"]
     yt = YouTube()
     own, comp = [], []
-    deadline = time.time() + min(float(cfg.at("topics.youtube_seconds", 20)), max_seconds() / 4)  # YouTube не задерживает поиск
+    deadline = time.time() + min(float(cfg.at("topics.youtube_seconds", 20)), max_seconds_for(provider) / 5)
 
     ref = chan.get("youtube_channel_id") or chan.get("youtube_handle")
     if ref and not mock_mode():
@@ -195,7 +270,19 @@ def refresh(more: bool = False, provider: str | None = None, gen: int | None = N
             uniq.append(v)
     comp = uniq[:40]
 
-    _set(stage="Ищу актуальные темы в Google…")
+    _set(stage="Смотрю годовщины ближайших недель (Википедия)…")
+    try:
+        from .anniversaries import upcoming
+        ann = upcoming(int(cfg.at("topics.anniversary_days", 45)), budget=min(20.0, max_seconds_for(provider) / 4))
+    except Exception:  # noqa: BLE001
+        ann = []
+    _state["anniversaries"] = ann
+    ann_text = "\n".join(f"- {a['date']}: {a['years_ago']} лет — {a['text'][:160]}" for a in ann[:12]) or "(нет данных)"
+    from ..providers.catalog import CATALOG
+    pid = _primary(provider)
+    local = bool(CATALOG["text"].get(pid or "") and (CATALOG["text"][pid].local or CATALOG["text"][pid].screen))
+    budget = max_seconds_for(provider)
+    _set(stage=f"Придумываю темы ({CATALOG['text'][pid].label if pid in CATALOG['text'] else 'ИИ'})…")
     old = cached()
     published = list(prof.get("published_topics") or []) + [v["title"] for v in own]
     from ..core.project import Project
@@ -209,13 +296,22 @@ def refresh(more: bool = False, provider: str | None = None, gen: int | None = N
             "(нет данных — найди популярные ролики ниши через поиск Google)"
 
     g = llm()
-    topics = g.generate_json(PROMPT.format(
-        channel=chan["name"], niche=chan.get("niche", ""), audience=chan.get("audience", ""),
-        formats="; ".join(chan.get("formats", [])), today=dt.date.today().isoformat(),
-        published="\n".join(f"- {t}" for t in dict.fromkeys(published)), own=fmt(own[:15]), competitors=fmt(comp[:30]),
-        count=int(cfg.at("topics.count", 6))), search=True, schema=TOPIC_SCHEMA, temperature=0.9, cache=False,
-        deadline=max(10.0, max_seconds() - (time.time() - t0)), only=provider,
-        search_query=f"{dt.date.today().year} годовщина история {chan.get('niche', '')}".strip())
+    count = int(cfg.at("topics.count", 6))
+    uniq_pub = list(dict.fromkeys(published))
+    if local:  # локальная модель: короткий промт и простая схема — в разы быстрее на слабой видеокарте
+        prompt = LOCAL_PROMPT.format(channel=chan["name"], niche=chan.get("niche", ""), today=dt.date.today().isoformat(),
+                                     published="; ".join(uniq_pub[:25]), anniversaries=ann_text, count=min(count, 5))
+        schema = LOCAL_SCHEMA
+    else:
+        prompt = PROMPT.format(
+            channel=chan["name"], niche=chan.get("niche", ""), audience=chan.get("audience", ""),
+            formats="; ".join(chan.get("formats", [])), today=dt.date.today().isoformat(),
+            published="\n".join(f"- {t}" for t in uniq_pub), own=fmt(own[:15]), competitors=fmt(comp[:30]),
+            anniversaries=ann_text, count=count)
+        schema = TOPIC_SCHEMA
+    topics = g.generate_json(prompt, search=True, schema=schema, temperature=0.9, cache=True,
+                             deadline=max(10.0, budget - (time.time() - t0)), only=provider, max_tokens=4096 if local else 16384,
+                             search_query=f"{dt.date.today().year} годовщина история {chan.get('niche', '')[:60]}".strip())
     web = g.sources()
     if isinstance(topics, dict):
         topics = topics.get("topics") or topics.get("items") or []

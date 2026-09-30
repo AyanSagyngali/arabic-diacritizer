@@ -12,13 +12,13 @@ import threading
 
 from ..config import mock_mode
 from ..core import events
-from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested
+from ..core.errors import NoProviderLeft, RegionBlocked, StageStalled, StopRequested, UserActionRequired
 from ..core.parallel import parallel_map, workers
 from ..core.storage import read_json, write_json
 from ..media.images import inspect_bytes, save_png, thumbnail, validate_file
 from ..providers import images as providers
 
-FATAL = (StopRequested, StageStalled, RegionBlocked)
+FATAL = (StopRequested, StageStalled, RegionBlocked, UserActionRequired)
 
 
 def run(ctx) -> None:
@@ -47,6 +47,25 @@ def run(ctx) -> None:
             png.unlink()
         if state.get(fid, {}).get("status") == "done":
             state[fid]["status"] = "pending"
+    write_json(state_path, state)
+    # «свои файлы»: картинки из 04_images/import/ (001.png, 002.jpg, …) используются вместо генерации
+    imp = idir / "import"
+    imp.mkdir(exist_ok=True)
+    for f in frames:
+        fid = f["frame_id"]
+        if state.get(fid, {}).get("status") == "done":
+            continue
+        src = next((x for x in sorted(imp.glob(f"{fid}.*")) if x.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")), None)
+        if src is None:
+            continue
+        ok_, reason, im = inspect_bytes(src.read_bytes(), min_w)
+        if not ok_:
+            ctx.log.warn(f"Frame {fid}: свой файл {src.name} не подходит ({reason}) — генерирую", "flow")
+            continue
+        save_png(im, idir / f"{fid}.png")
+        thumbnail(idir / f"{fid}.png")
+        state[fid] = {"status": "done", "backend": "files", "size": f"{im.width}x{im.height}"}
+        ctx.log.log(f"Frame {fid} ✓ (свой файл {src.name})", "flow")
     write_json(state_path, state)
     retries = int(cfg.at("images.retries_per_frame", 2))
     ctx.log.log(f"Images: chain {' → '.join(providers.router().chain())}", "flow")

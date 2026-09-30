@@ -13,7 +13,7 @@ import re
 import time
 
 from ..config import config
-from ..core.errors import ProviderQuota, ProviderUnavailable
+from ..core.errors import ProviderQuota, ProviderUnavailable, UserActionRequired
 from . import browser
 
 LOGIN_HINTS = ("accounts.google.com", "signin", "ServiceLogin")
@@ -82,9 +82,8 @@ class FlowBackend:
         if not self._ready():
             if _has_fallback():  # не держать производство: кадры сделает следующий источник, а вход можно выполнить позже
                 raise ProviderUnavailable("Flow: не выполнен вход в Google — нажмите «Войти» в «Готовности системы»")
-            self.ctx.require_user(
-                "Откройте окно браузера ISTORIK (Google Flow) и войдите в свой аккаунт Google. "
-                "После входа нажмите «Продолжить».", done=self._ready)
+            raise UserActionRequired("Google Flow: войдите в свой аккаунт Google (с подпиской AI Pro) в окне браузера ISTORIK. "
+                                     "Вход сохранится — делать это нужно один раз.", url=self.page.url, provider="Google Flow")
 
         if not flow_state.get("project_url"):
             self._create_project()
@@ -97,12 +96,14 @@ class FlowBackend:
         except Exception:
             pass
         if not self._prompt_box():
-            self.ctx.require_user(
-                "Не удалось найти поле ввода промта во Flow (интерфейс мог измениться). В окне браузера откройте проект Flow "
-                "в режиме создания изображений (16:9, 1 вариант на промт) и нажмите «Продолжить».",
-                done=lambda: self._prompt_box() is not None)
-            flow_state["project_url"] = self.page.url
-            p.save()
+            from ..desktop_agent.page import shot
+            f = shot(self.page, "flow_no_prompt_box")
+            if _has_fallback():
+                raise ProviderUnavailable("Google Flow: не нашёл поле ввода промта — интерфейс мог измениться"
+                                          + (f" (скриншот: {f})" if f else ""))
+            raise UserActionRequired("Google Flow: не нашёл поле ввода промта (интерфейс мог измениться). Откройте в окне "
+                                     "браузера проект Flow в режиме изображений (16:9, 1 вариант).", url=self.page.url,
+                                     provider="Google Flow")
 
     def _create_project(self) -> None:
         pg = self.page

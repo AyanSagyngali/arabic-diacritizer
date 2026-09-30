@@ -88,9 +88,8 @@ def start_comfyui() -> bool:
 
 
 # ---------- статус ----------
-def status() -> dict:
-    from .text import OllamaText
-    ol = OllamaText().status() if not mock_mode() else {"running": True, "models": [], "has_model": True}
+def local_status() -> dict:
+    """Что установлено — только локальные проверки файлов и пакетов (быстро, без сети). Для монитора состояния."""
     pv = config().at("providers.opts.piper_voice") or "ru_RU-denis-medium"
     ck = comfy_checkpoints()
     kind = config().at("providers.opts.comfy_model") or "sdxl"
@@ -98,14 +97,45 @@ def status() -> dict:
         "edge": {"installed": has("edge_tts")},
         "piper": {"installed": has("piper") and (config().path("data") / "models" / "piper" / f"{pv}.onnx").exists(),
                   "package": has("piper")},
-        "silero": {"installed": has("torch")},
+        "silero": {"installed": has("torch"), "long_paths": long_paths_enabled()},
         "chatterbox": {"installed": has("chatterbox"), "sample": (config().path("data") / "voice_sample.wav").exists()},
-        "ollama": {"installed": bool(ollama_exe()) or ol["running"], "running": ol["running"], "models": ol["models"],
-                   "has_model": ol["has_model"], "model": config().at("providers.opts.ollama_model")},
-        "comfyui": {"installed": bool(comfy_main()) and bool(ck and (ck / COMFY_FILES[kind]["file"]).exists()),
+        "ollama_exe": bool(ollama_exe()),
+        "comfyui": {"installed": bool(comfy_main()) and bool(ck and (ck / COMFY_FILES.get(kind, COMFY_FILES["sdxl"])["file"]).exists()),
                     "program": bool(comfy_main())},
-        "install": {k: dict(v) for k, v in _state.items()},
     }
+
+
+def long_paths_enabled() -> bool | None:
+    """Windows: включены ли длинные пути (без них torch/Silero не ставится). None — не Windows."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            return bool(winreg.QueryValueEx(k, "LongPathsEnabled")[0])
+    except OSError:
+        return False
+
+
+def status() -> dict:
+    """Для панели: из кэша монитора (мгновенно)."""
+    from ..core.status import monitor
+    from .ollama import current_model
+    loc = dict(monitor().get("install") or {})
+    ol = monitor().get("ollama") or {}
+    if mock_mode():
+        ol = {"running": True, "models": [{"name": "qwen3:4b"}]}
+    model, why = current_model(ol.get("models", [])) if ol.get("running") else (None, "")
+    loc.setdefault("edge", {"installed": False})
+    loc.setdefault("piper", {"installed": False})
+    loc.setdefault("silero", {"installed": False})
+    loc.setdefault("chatterbox", {"installed": False, "sample": False})
+    loc.setdefault("comfyui", {"installed": False, "program": False})
+    loc["ollama"] = {"installed": bool(loc.get("ollama_exe")) or bool(ol.get("running")), "running": bool(ol.get("running")),
+                     "models": [m["name"] for m in ol.get("models", [])], "has_model": bool(model), "model": model,
+                     "note": why, "checking": not ol}
+    loc["install"] = {k: dict(v) for k, v in _state.items()}
+    return loc
 
 
 def _set(name: str, **kw) -> None:
@@ -204,6 +234,11 @@ def _torch(name: str, cuda: bool) -> None:
 
 
 def _silero(name: str) -> None:
+    if long_paths_enabled() is False and not has("torch"):
+        raise RuntimeError("В Windows выключены длинные пути — torch (нужен Silero) не установится. Используйте Piper (уже "
+                           "работает) или включите длинные пути: PowerShell от администратора → New-ItemProperty -Path "
+                           "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem -Name LongPathsEnabled -Value 1 "
+                           "-PropertyType DWORD -Force, перезагрузка, затем «Установить» ещё раз.")
     _torch(name, cuda=False)
     _set(name, text="Скачиваю голосовую модель Silero…", pct=None)
     from .voice import SileroTTS
@@ -220,14 +255,15 @@ def _chatterbox(name: str) -> None:
 
 
 def _ollama(name: str) -> None:
-    from .text import OllamaText
     exe = ollama_exe()
-    if not exe and not OllamaText().status()["running"]:
+    from .ollama import probe
+    if not exe and not probe(3)["running"]:
         if sys.platform.startswith("win"):
             if shutil.which("winget"):
                 _set(name, text="Устанавливаю Ollama (winget)…", pct=None)
                 subprocess.run(["winget", "install", "-e", "--id", "Ollama.Ollama", "--accept-package-agreements",
-                                "--accept-source-agreements", "--silent"], capture_output=True, text=True, creationflags=NOWIN)
+                                "--accept-source-agreements", "--silent"], capture_output=True, text=True, creationflags=NOWIN,
+                               timeout=1800)
             exe = ollama_exe()
             if not exe:
                 setup = config().path("data") / "OllamaSetup.exe"
@@ -237,21 +273,22 @@ def _ollama(name: str) -> None:
                 exe = ollama_exe()
         if not exe:
             raise RuntimeError("Ollama не установилась. Скачайте её с ollama.com/download, установите и нажмите «Установить» ещё раз.")
-    if not OllamaText().status()["running"]:
+    if not probe(3)["running"]:
         _set(name, text="Запускаю Ollama…", pct=None)
         subprocess.Popen([exe or "ollama", "serve"], creationflags=NOWIN, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(30):
             time.sleep(1)
-            if OllamaText().status()["running"]:
+            if probe(2)["running"]:
                 break
         else:
             raise RuntimeError("Ollama не запустилась — откройте приложение Ollama вручную и нажмите «Установить» ещё раз")
-    model = config().at("providers.opts.ollama_model") or "qwen3:8b"
-    if OllamaText().status()["has_model"]:
+    from .ollama import probe
+    model = config().at("providers.opts.ollama_model") or "qwen3:4b"
+    if any(m["name"] in (model, f"{model}:latest") for m in probe(3)["models"]):
         return
     url = (config().at("providers.opts.ollama_url") or "http://127.0.0.1:11434").rstrip("/")
     _set(name, text=f"Скачиваю модель {model}…", pct=0.0)
-    with httpx.stream("POST", f"{url}/api/pull", json={"model": model, "stream": True}, timeout=httpx.Timeout(None, connect=10)) as r:
+    with httpx.stream("POST", f"{url}/api/pull", json={"model": model, "stream": True}, timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10)) as r:
         last = 0.0
         for line in r.iter_lines():
             if not line:

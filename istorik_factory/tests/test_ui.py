@@ -257,13 +257,19 @@ def test_sources_and_limits_states(server, browser, width):
     pg.locator('.prov-item[data-part="text"]').nth(1).get_by_role("button", name="Выше").click()
     pg.wait_for_function(f"document.querySelector('.prov-item[data-part=\"text\"]').dataset.id !== '{first}'")
     # добавить запасной источник озвучки
-    pg.select_option('[data-add="voice"]', "silero")
-    pg.wait_for_selector('.prov-item[data-part="voice"][data-id="silero"]')
+    add = pg.eval_on_selector('[data-add="voice"]', "s => [...s.options].map(o => o.value).filter(Boolean)[0]")
+    pg.select_option('[data-add="voice"]', add)
+    pg.wait_for_selector(f'.prov-item[data-part="voice"][data-id="{add}"]')
     # «Рекомендовать» для кадров
     pg.locator('[data-rec="images"]').click()
     pg.wait_for_selector(".prov-why")
     shot(pg, "10_sources", width)
-    assert pg.locator('.prov-item[data-part="images"]').last.get_attribute("data-id") == "none"
+    assert pg.locator('.prov-item[data-part="images"][data-id="none"]').count() == 0, "«Нет» не добавляется рекомендацией"
+    # режимы и подписка Flow
+    pg.select_option('[data-mode="text"]', "background")
+    pg.wait_for_selector("text=Режим сохранён")
+    pg.check("#flowSub")
+    pg.wait_for_function("() => document.querySelector('.prov-item[data-part=\"images\"]').dataset.id === 'flow'")
 
     # лимиты: точный (Groq), оценка (OpenRouter), локальный ∞
     limits().record("groq", "llama-3.3-70b-versatile", {"x-ratelimit-limit-requests": "1000", "x-ratelimit-remaining-requests": "640"})
@@ -296,7 +302,7 @@ def test_sources_and_limits_states(server, browser, width):
     # вернуть настройки по умолчанию для других тестов
     from factory import settings
     from factory.providers.catalog import DEFAULT_CHAINS
-    settings.save(server["cfg"], {"chains": dict(DEFAULT_CHAINS)})
+    settings.save(server["cfg"], {"chains": dict(DEFAULT_CHAINS), "opts": {"flow_subscription": "", "mode_text": "hybrid"}})
 
 
 def test_guidelines_static_audit():
@@ -319,3 +325,54 @@ def test_guidelines_static_audit():
     assert "user-scalable=no" not in html and "maximum-scale" not in html
     assert "..." not in re.sub(r"\.\.\.[a-zA-Z(\[{]", "", js), "многоточие должно быть «…»"
     assert "setInterval(tick, 1500)" not in js and "/api/events" in js, "без опроса — только SSE"
+
+
+def _start_uvicorn(port):
+    import uvicorn
+    from factory.web.server import app
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), 0.2).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    return srv, th
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_panel_survives_slow_state_and_restart(server, browser, width, monkeypatch):
+    """/api/state медленный → «Подключаюсь…» и повторы; сервер перезапустили → панель сама переподключилась."""
+    from factory import providers
+    orig = providers.snapshot
+    calls = {"n": 0}
+
+    def slow():
+        calls["n"] += 1
+        if calls["n"] <= 1:
+            time.sleep(10)  # дольше таймаута запроса в панели (8 с)
+        return orig()
+    monkeypatch.setattr(providers, "snapshot", slow)
+    port = _port()
+    srv, th = _start_uvicorn(port)
+    pg, errors = page(browser, width)
+    pg.goto(f"http://127.0.0.1:{port}/")
+    pg.wait_for_selector(".connecting")
+    shot(pg, "13_connecting", width)
+    pg.wait_for_selector("#topicsGrid", timeout=40000)
+    assert calls["n"] >= 2
+    # перезапуск программы: сервер падает и поднимается на том же порту
+    srv.should_exit = True
+    th.join(10)
+    time.sleep(1)
+    srv, th = _start_uvicorn(port)
+    t0 = time.time()
+    pg.wait_for_function("() => !document.querySelector('.connecting') && !!document.querySelector('#topicsGrid')", timeout=30000)
+    assert time.time() - t0 < 30
+    assert no_hscroll(pg)
+    srv.should_exit = True
+    real = [e for e in errors if "Failed to load resource" not in e and "ERR_CONNECTION_REFUSED" not in e
+            and "net::ERR" not in e and "EventSource" not in e]
+    assert not real, real

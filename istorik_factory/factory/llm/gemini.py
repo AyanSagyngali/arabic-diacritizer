@@ -325,7 +325,8 @@ class Gemini:
                     with self._mlock:
                         until = time.time() + (secs if not daily else 6 * 3600)
                         self._mcool[(key.value, model)] = until
-                        if daily:  # лимит общий на проект Google: все ключи того же проекта тоже исчерпаны для этой модели
+                        # лимит общий на проект Google (и минутный, и дневной): ключи того же проекта не дёргаем зря
+                        if True:
                             try:
                                 from .usage import same_project
                                 for other in same_project(key.value, [k.value for k in self.pool.keys()]):
