@@ -182,8 +182,9 @@ def _node_env() -> dict:
 
 
 # ---------- автонастройка (разрешено пользователем): ключ шлюза и ваши ключи внутри OmniRoute ----------
-# Всё локально на вашем компьютере: ключ шлюза сохраняется в .env (OMNIROUTE_API_KEY), ваши ключи передаются OmniRoute
-# через переменную окружения процесса (не в командной строке) и хранятся у него зашифрованными. В git ничего не попадает.
+# Всё локально: ключ шлюза сохраняется в .env (OMNIROUTE_API_KEY), ваши ключи передаются OmniRoute через переменную
+# окружения процесса (не в командной строке) и хранятся у него зашифрованными. В git ничего не попадает.
+# Выключить — omniroute_autokeys = 0.
 USER_KEYS = {"GROQ_API_KEY": "groq", "OPENROUTER_API_KEY": "openrouter", "MISTRAL_API_KEY": "mistral",
              "CEREBRAS_API_KEY": "cerebras", "XAI_API_KEY": "xai", "DEEPSEEK_API_KEY": "deepseek", "OPENAI_API_KEY": "openai"}
 KEY_NAME = "ISTORIK VIDEO FACTORY"
@@ -199,6 +200,10 @@ def pkg_root() -> Path | None:
     return next((c for c in cands if (c / "bin" / "cli" / "api.mjs").exists()), None)
 
 
+def _cli_env(**extra) -> dict:
+    return dict(_node_env(), OMNIROUTE_BASE_URL=root_url(), NO_COLOR="1", **extra)
+
+
 def admin(path: str, method: str = "GET", body: dict | None = None, timeout: float = 60.0) -> tuple[int, Any]:
     """Служебный API OmniRoute на этом компьютере (как команда `omniroute`). → (HTTP-статус, JSON или текст)."""
     from .install import node_exe
@@ -210,7 +215,7 @@ def admin(path: str, method: str = "GET", body: dict | None = None, timeout: flo
         args.append(json.dumps(body, ensure_ascii=False))
     try:
         r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                           env=dict(_node_env(), OMNIROUTE_BASE_URL=root_url(), NO_COLOR="1"), creationflags=NOWIN)
+                           env=_cli_env(), creationflags=NOWIN)
     except (OSError, subprocess.TimeoutExpired) as ex:
         return 0, str(ex)
     line = next((x for x in reversed(r.stdout.splitlines()) if x[:1].isdigit()), "0 " + (r.stderr or "")[-300:])
@@ -240,7 +245,6 @@ def _tag(key: str) -> str:
 
 
 def wanted_connections() -> list[tuple[str, str, str]]:
-    """Ваши ключи из .env для OmniRoute: [(провайдер, имя подключения, ключ)]."""
     from ..config import gemini_keys
     out = [("gemini", f"istorik-gemini-{_tag(k)}", k) for k in gemini_keys()]
     for env, prov in USER_KEYS.items():
@@ -251,8 +255,7 @@ def wanted_connections() -> list[tuple[str, str, str]]:
 
 
 def sync_user_keys() -> dict:
-    """Добавить ваши ключи (Gemini, Groq, OpenRouter…) в OmniRoute: модель auto будет чередовать их с бесплатными.
-    Уже добавленные не дублируются. → {"added": [...], "failed": [...]}"""
+    """Ваши ключи (Gemini, Groq, OpenRouter…) → OmniRoute, чтобы auto чередовал их с бесплатными. Без дублей."""
     res: dict[str, list] = {"added": [], "failed": []}
     want, e = wanted_connections(), exe()
     if not want or not e:
@@ -265,11 +268,10 @@ def sync_user_keys() -> dict:
     for prov, name, key in want:
         if name in have:
             continue
-        env = dict(_node_env(), OMNIROUTE_BASE_URL=root_url(), NO_COLOR="1", ISTORIK_OMNI_CRED=key)
         try:
             r = subprocess.run([e, "providers", "add", prov, "--name", name, "--credential-env", "ISTORIK_OMNI_CRED", "--yes",
                                 "--json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                               env=env, creationflags=NOWIN)
+                               env=_cli_env(ISTORIK_OMNI_CRED=key), creationflags=NOWIN)
             if r.returncode == 0:
                 res["added"].append(prov)
             else:
@@ -283,7 +285,7 @@ def setup(say=None) -> dict:
     """После запуска OmniRoute: ключ шлюза + ваши ключи внутри него. Безопасно вызывать много раз."""
     say = say or (lambda _t: None)
     out: dict[str, Any] = {"key": False, "added": [], "failed": []}
-    if str(config().at("providers.opts.omniroute_autokeys") or "1") != "1":
+    if mock_mode() or str(config().at("providers.opts.omniroute_autokeys") or "1") != "1":
         return out
     try:
         ensure_gateway_key()
